@@ -4,8 +4,8 @@
 This repository is a small Python package for dynamically loading gRPC/protobuf definitions.
 
 - `src/grapec/__init__.py`: core library API (`load(path: str)`).
-- `hello.proto`: example protobuf service contract used by demos.
-- `server.py` and `client.py`: local gRPC demo scripts.
+- `examples/hello/hello.proto`: example protobuf service contract used by demos.
+- `examples/hello/server.py` and `examples/hello/client.py`: local gRPC demo scripts.
 - `dist/`: built artifacts (`.whl`, `.tar.gz`); treat as output, not source.
 - `pyproject.toml` and `uv.lock`: packaging metadata and dependency lockfile.
 
@@ -15,8 +15,8 @@ Keep reusable logic inside `src/grapec/`; avoid adding business logic to demo sc
 Use `uv` for a consistent local environment:
 
 - `uv sync`: create/update the virtual environment from lockfile.
-- `uv run python server.py`: run the demo gRPC server on `localhost:50051`.
-- `uv run python client.py`: call the demo `Greeter` service.
+- `uv run python examples/hello/server.py`: run the demo gRPC server on `localhost:50051`.
+- `uv run python examples/hello/client.py`: call the demo `Greeter` service.
 - `uv build`: build wheel and sdist into `dist/`.
 
 If `uv` is unavailable, install dependencies with `pip install grpcio-tools` and run scripts with `python`.
@@ -44,4 +44,4 @@ Current history is minimal (e.g., `🎉 Initialize project`), so use concise, im
 - Recommended format: optional emoji + short summary, e.g., `✨ Add proto path validation`.
 - Keep commits scoped to one logical change.
 - PRs should include: purpose, key changes, how to run/verify, and related issue links.
-- For behavior changes in `client.py`/`server.py`, include a short run example or output snippet.
+- For behavior changes in `examples/hello/client.py` or `examples/hello/server.py`, include a short run example or output snippet.

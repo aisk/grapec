@@ -1,4 +1,5 @@
 syntax = "proto3";
+package examples.hello.v1;
 
 // The greeting service definition.
 service Greeter {

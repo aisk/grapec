@@ -1,14 +1,19 @@
+from pathlib import Path
+
 import grpc
 import logging
 import grapec
 from concurrent import futures
 
-hello_pb2, hello_pb2_grpc = grapec.load('hello.proto')
+PROTO_PATH = Path(__file__).resolve().with_name("hello.proto")
+hello_pb2, hello_pb2_grpc = grapec.load(str(PROTO_PATH))
 
 
 class GreeterServicer(hello_pb2_grpc.GreeterServicer):
     def SayHello(self, request, context):
-        return hello_pb2.HelloRequest(name='what')
+        if not request.name.strip():
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
+        return hello_pb2.HelloReply(message=f"Hello, {request.name}")
 
 
 def serve():
