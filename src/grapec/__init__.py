@@ -32,3 +32,18 @@ def load(path: str) -> tuple[types.ModuleType, types.ModuleType]:
             sys.modules[pb2_module_name] = previous_pb2
 
     return pb2_module, pb2_grpc_module
+
+
+def install_import_hook() -> None:
+    from .hook import install
+
+    install()
+
+
+def uninstall_import_hook() -> None:
+    from .hook import uninstall
+
+    uninstall()
+
+
+__all__ = ["load", "install_import_hook", "uninstall_import_hook"]

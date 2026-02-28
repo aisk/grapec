@@ -1,10 +1,10 @@
-from pathlib import Path
-
 import grpc
 import grapec
 
-PROTO_PATH = Path(__file__).resolve().with_name("hello.proto")
-hello_pb2, hello_pb2_grpc = grapec.load(str(PROTO_PATH))
+grapec.install_import_hook()
+
+import hello_pb2
+import hello_pb2_grpc
 
 
 def run():
