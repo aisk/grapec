@@ -2,138 +2,117 @@
 
 Pronunciation (IPA): `/ɡreɪ.peɪk/` (similar to "gray-pay-k").
 
-A lightweight utility for dynamically loading `.proto` files at runtime and exposing the two Python gRPC module views.
+Declare plain Python classes, get cross language serialization for free.
+
+You write a class that looks like a dataclass. grapec turns it into one and
+adds `to_bytes` / `from_bytes` that speak the protobuf wire format, so the
+bytes can be exchanged with any standard protobuf or gRPC implementation.
+No `.proto` files, no code generation, no runtime dependencies.
+
+Current scope is struct serialization. RPC transports are the next step.
+
+## Install
+
+Requires Python 3.12+.
+
+```
+pip install grapec
+```
 
 ## Usage
 
 ```python
+import enum
+from datetime import datetime
+
 import grapec
 
-pb2, pb2_grpc = grapec.load("path/to/your.proto")
+
+class Priority(enum.IntEnum):
+    UNSPECIFIED = 0
+    LOW = 1
+    HIGH = 2
+
+
+@grapec.struct(package="example.hello.v1")
+class Tag:
+    key: str
+    value: str
+
+
+@grapec.struct(package="example.hello.v1")
+class HelloRequest:
+    name: str
+    priority: Priority = Priority.LOW
+    tags: list[Tag]
+    sent_at: datetime | None
+
+
+req = HelloRequest(name="grapec", tags=[Tag(key="lang", value="python")])
+
+data = bytes(req)                       # or req.to_bytes()
+same = HelloRequest.from_bytes(data)
+assert same == req
 ```
 
-- `pb2`: message types and `DESCRIPTOR` (equivalent to `*_pb2.py`)
-- `pb2_grpc`: `Stub` / `Servicer` / `add_*_to_server` helpers (equivalent to `*_pb2_grpc.py`)
-- Supports both relative and absolute proto paths.
-
-> If the proto has no `service`, `load` still returns `(pb2, pb2_grpc)`, but `pb2_grpc` will not contain `Stub/Servicer` symbols.
-
-### Import Hook
-
-```python
-import grapec
-
-grapec.install_import_hook()
-
-import hello_pb2
-import hello_pb2_grpc
-```
-
-- After `install_import_hook()`, Grapec searches `cwd + sys.path` for a matching `.proto` file, for example `hello_pb2` -> `hello.proto`.
-- Call `grapec.uninstall_import_hook()` to remove the hook when you no longer need it.
-
-
-## Quick Example
-
-The demo lives in `examples/hello/`.
-
-`examples/hello/hello.proto`:
+The equivalent proto definition, which is what the other side would use:
 
 ```proto
 syntax = "proto3";
-package examples.hello.v1;
+package example.hello.v1;
 
-// The greeting service definition.
-service Greeter {
-  // Sends a greeting
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
+message Tag {
+  string key = 1;
+  string value = 2;
 }
 
-// The request message containing the user's name.
 message HelloRequest {
   string name = 1;
-}
-
-// The response message containing the greetings
-message HelloReply {
-  string message = 1;
+  Priority priority = 2;
+  repeated Tag tags = 3;
+  optional google.protobuf.Timestamp sent_at = 4;
 }
 ```
 
-`examples/hello/server.py`:
+## Rules
 
-```python
-from pathlib import Path
+- `@grapec.struct(package=...)` makes the class a keyword only dataclass. `package` is required and becomes the namespace on the wire side.
+- Fields are numbered 1, 2, 3, ... in declaration order. Use `Annotated[T, grapec.Id(n)]` to pin a number. Fields after a pinned one continue counting from it.
+- Fields without a default are required when constructing, like a dataclass. `list` and `dict` fields default to empty, `T | None` fields default to `None`.
+- When decoding, a missing field becomes the zero value (`0`, `""`, `False`, empty list, default instance). A missing `T | None` field becomes `None`.
+- Unknown fields in the input are skipped, unknown enum values are kept as plain `int`.
 
-import grpc
-import logging
-import grapec
-from concurrent import futures
+## Type mapping
 
-PROTO_PATH = Path(__file__).resolve().with_name("hello.proto")
-hello_pb2, hello_pb2_grpc = grapec.load(str(PROTO_PATH))
+| Python | proto |
+|---|---|
+| `int` | `int64` |
+| `float` | `double` |
+| `str` | `string` |
+| `bytes` | `bytes` |
+| `bool` | `bool` |
+| `enum.IntEnum` subclass | `enum` |
+| another `@grapec.struct` class | `message` |
+| `list[T]` | `repeated T` |
+| `dict[K, V]` | `map<K, V>` (keys: `int`, `str`, `bool`) |
+| `T \| None` | `optional T` |
+| `datetime` | `google.protobuf.Timestamp` (naive values are treated as local time) |
+| `timedelta` | `google.protobuf.Duration` |
 
+`int32`, `uint64`, `sint64`, `fixed64` and friends share the varint encoding with `int64` for the common cases, so only `int` is exposed. `float32`, `oneof`, `Any` and proto2 features are out of scope for now.
 
-class GreeterServicer(hello_pb2_grpc.GreeterServicer):
-    def SayHello(self, request, context):
-        if not request.name.strip():
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "name is required")
-        return hello_pb2.HelloReply(message=f"Hello, {request.name}")
+## Example
 
-
-def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    hello_pb2_grpc.add_GreeterServicer_to_server(
-        GreeterServicer(), server
-    )
-    server.add_insecure_port("localhost:50051")
-    server.start()
-    server.wait_for_termination()
-
-
-if __name__ == "__main__":
-    logging.basicConfig()
-    serve()
+```
+cd examples/hello
+python main.py
 ```
 
-`examples/hello/client.py`:
+## Development
 
-```python
-import grpc
-import grapec
-
-grapec.install_import_hook()
-
-import hello_pb2
-import hello_pb2_grpc
-
-
-def run():
-    with grpc.insecure_channel("localhost:50051") as channel:
-        stub = hello_pb2_grpc.GreeterStub(channel)
-        req = hello_pb2.HelloRequest(name='Grapec')
-        resp = stub.SayHello(req)
-        print(resp.message)
-
-
-if __name__ == "__main__":
-    run()
+```
+uv sync
+uv run pytest
 ```
 
-1. Start the server:
-
-```bash
-uv run --with grapec server.py
-```
-
-2. Run the client in another terminal:
-
-```bash
-uv run --with grapec client.py
-```
-
-Expected output:
-
-```text
-Hello, Grapec
-```
+Tests compile `tests/oracle.proto` with `grpcio-tools` and compare grapec's bytes against the official protobuf implementation.

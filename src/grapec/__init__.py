@@ -1,49 +1,21 @@
-import sys
-import types
-from pathlib import Path
+"""grapec: declare plain Python classes, serialize them for cross language RPC.
 
-from grpc_tools import protoc
-from grpc_tools import _protoc_compiler
+Example::
 
+    import grapec
 
-def load(path: str) -> tuple[types.ModuleType, types.ModuleType]:
-    proto_path = Path(path)
-    proto_name = proto_path.name
-    include_path = str(proto_path.parent if str(proto_path.parent) else Path("."))
-    include_paths = [include_path.encode()]
+    @grapec.struct(package="example.hello.v1")
+    class HelloRequest:
+        name: str
+        tags: list[str]
 
-    pb2_module_name = protoc._proto_file_to_module_name('_pb2', proto_name)
-    pb2_grpc_module_name = protoc._proto_file_to_module_name('_pb2_grpc', proto_name)
+    data = bytes(HelloRequest(name="x"))
+    req = HelloRequest.from_bytes(data)
+"""
 
-    pb2_module = types.ModuleType(pb2_module_name)
-    protos = _protoc_compiler.get_protos(proto_name.encode(), include_paths)
-    exec(protos[0][1], pb2_module.__dict__)
+from ._codec import EncodeError
+from ._schema import Id, SchemaError, is_struct
+from ._struct import struct
+from ._wire import WireError
 
-    pb2_grpc_module = types.ModuleType(pb2_grpc_module_name)
-    services = _protoc_compiler.get_services(proto_name.encode(), include_paths)
-    previous_pb2 = sys.modules.get(pb2_module_name)
-    sys.modules[pb2_module_name] = pb2_module
-    try:
-        exec(services[0][1], pb2_grpc_module.__dict__)
-    finally:
-        if previous_pb2 is None:
-            del sys.modules[pb2_module_name]
-        else:
-            sys.modules[pb2_module_name] = previous_pb2
-
-    return pb2_module, pb2_grpc_module
-
-
-def install_import_hook() -> None:
-    from .hook import install
-
-    install()
-
-
-def uninstall_import_hook() -> None:
-    from .hook import uninstall
-
-    uninstall()
-
-
-__all__ = ["load", "install_import_hook", "uninstall_import_hook"]
+__all__ = ["struct", "Id", "is_struct", "SchemaError", "EncodeError", "WireError"]

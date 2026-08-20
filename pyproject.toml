@@ -1,15 +1,13 @@
 [project]
 name = "grapec"
-version = "0.2.0"
-description = "Load protobuf and grpc definition file dynamiclly"
+version = "0.3.0"
+description = "Declare plain Python classes and serialize them for cross language RPC"
 readme = "README.md"
 authors = [
-    { name = "AN Long", email = "aisk1988@gmail.com" }
+    { name = "An Long", email = "aisk1988@gmail.com" }
 ]
-requires-python = ">=3.9"
-dependencies = [
-    "grpcio-tools>=1.73.0",
-]
+requires-python = ">=3.12"
+dependencies = []
 
 [build-system]
 requires = ["hatchling"]
@@ -18,4 +16,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+    "grpcio-tools>=1.73.0",
 ]

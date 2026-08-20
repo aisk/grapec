@@ -1,0 +1,38 @@
+syntax = "proto3";
+package test.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  RED = 1;
+  BLUE = 2;
+}
+
+message Inner {
+  string label = 1;
+  int64 weight = 2;
+}
+
+message Everything {
+  int64 i = 1;
+  double f = 2;
+  string s = 3;
+  bytes b = 4;
+  bool flag = 5;
+  Color color = 6;
+  Inner inner = 7;
+  repeated int64 ints = 8;
+  repeated string strs = 9;
+  repeated Inner inners = 10;
+  map<string, int64> counts = 11;
+  map<int64, Inner> by_id = 12;
+  optional int64 opt_i = 13;
+  optional string opt_s = 14;
+  Inner opt_inner = 15;
+  google.protobuf.Timestamp ts = 16;
+  google.protobuf.Duration dur = 17;
+  int64 renumbered = 20;
+  repeated Color colors = 21;
+}
