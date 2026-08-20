@@ -1,18 +1,16 @@
-"""gRPC over HTTP/2 transport, built on the sans-IO ``h2`` library.
+"""gRPC over HTTP/2, built on the sans-IO ``h2`` library.
 
-This module is the only place that knows about gRPC framing and headers.
-The client talks to it through the small :class:`Connection` interface so
-other protocols can be added next to it.
+:class:`GrpcProtocol` holds all protocol knowledge (HTTP/2 state, gRPC
+framing, headers, compression) and never touches a socket. The sync and
+async connections in ``_sync.py`` and ``_async.py`` only move bytes between
+it and the network.
 """
 
 from __future__ import annotations
 
 import base64
 import gzip
-import socket
-import ssl
 import struct as _struct
-import time
 import zlib
 from typing import Any
 from urllib.parse import unquote
@@ -25,7 +23,6 @@ import h2.exceptions
 from ._errors import RpcError, Status, TransportError
 
 USER_AGENT = "grapec"
-_RECV_SIZE = 65536
 
 _ENCODERS = {
     "gzip": gzip.compress,
@@ -40,54 +37,32 @@ ACCEPT_ENCODING = "identity,gzip,deflate"
 
 Metadata = dict[str, str | bytes]
 
+# errors from the IO layer or h2 that mean the connection is unusable
+IO_ERRORS = (OSError, h2.exceptions.H2Error, EOFError)
 
-class GrpcConnection:
-    """One HTTP/2 connection carrying one call at a time."""
 
-    def __init__(self, host: str, port: int, *, tls: bool, connect_timeout: float | None) -> None:
-        self._authority = f"{host}:{port}"
+class GrpcProtocol:
+    """Sans-IO gRPC client state for one HTTP/2 connection, one call at a time."""
+
+    def __init__(self, authority: str, *, tls: bool) -> None:
+        self._authority = authority
         self._scheme = "https" if tls else "http"
-        try:
-            sock = socket.create_connection((host, port), timeout=connect_timeout)
-            if tls:
-                ctx = ssl.create_default_context()
-                ctx.set_alpn_protocols(["h2"])
-                sock = ctx.wrap_socket(sock, server_hostname=host)
-                if sock.selected_alpn_protocol() != "h2":
-                    sock.close()
-                    raise TransportError("server did not negotiate HTTP/2")
-        except OSError as exc:
-            raise TransportError(f"cannot connect to {self._authority}: {exc}") from exc
-        self._sock = sock
         self._h2 = h2.connection.H2Connection(
             config=h2.config.H2Configuration(client_side=True, header_encoding="utf-8")
         )
         self._h2.initiate_connection()
-        self._flush()
-        self._dead = False
-
-    # -- Connection interface -------------------------------------------------
+        self.dead = False
+        self._call: _Call | None = None
 
     @property
     def healthy(self) -> bool:
-        if self._dead:
+        if self.dead:
             return False
-        state = self._h2.state_machine.state
-        return state is not h2.connection.ConnectionState.CLOSED
+        return self._h2.state_machine.state is not h2.connection.ConnectionState.CLOSED
 
-    def close(self) -> None:
-        self._dead = True
-        try:
-            self._h2.close_connection()
-            self._flush()
-        except Exception:
-            pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+    # -- driving the connection ----------------------------------------------
 
-    def unary(
+    def start(
         self,
         path: str,
         payload: bytes,
@@ -95,54 +70,85 @@ class GrpcConnection:
         timeout: float | None,
         metadata: Metadata | None,
         compression: str | None,
-    ) -> bytes:
-        """Send one request message, return the single response message."""
-        try:
-            return self._unary(path, payload, timeout, metadata, compression)
-        except RpcError:
-            raise
-        except TransportError:
-            self._dead = True
-            raise
-        except socket.timeout as exc:
-            self._dead = True
-            raise RpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
-        except (OSError, h2.exceptions.H2Error) as exc:
-            self._dead = True
-            raise TransportError(str(exc)) from exc
-
-    # -- implementation -------------------------------------------------------
-
-    def _unary(
-        self,
-        path: str,
-        payload: bytes,
-        timeout: float | None,
-        metadata: Metadata | None,
-        compression: str | None,
-    ) -> bytes:
-        deadline = time.monotonic() + timeout if timeout is not None else None
-        self._sock.settimeout(timeout)
-
+    ) -> None:
+        """Queue one unary call. Follow with ``data_to_send`` / ``feed`` until ``done``."""
+        if self._call is not None:
+            raise TransportError("connection is busy")
         if compression is not None and compression != "identity":
             try:
                 payload = _ENCODERS[compression](payload)
             except KeyError:
                 raise ValueError(f"unsupported compression {compression!r}") from None
-            compressed = 1
+            flag = 1
         else:
             compression = None
-            compressed = 0
-
+            flag = 0
         stream_id = self._h2.get_next_available_stream_id()
         self._h2.send_headers(stream_id, self._request_headers(path, timeout, metadata, compression))
-        self._send_body(stream_id, _struct.pack(">BI", compressed, len(payload)) + payload, deadline)
+        self._call = _Call(stream_id, _struct.pack(">BI", flag, len(payload)) + payload)
 
-        call = _Call()
-        while not call.ended:
-            self._pump(call, stream_id, deadline)
+    def data_to_send(self) -> bytes:
+        """Bytes to write to the network, pushes as much request body as flow control allows."""
+        call = self._call
+        if call is not None and call.pending:
+            while call.pending:
+                window = min(self._h2.local_flow_control_window(call.stream_id), self._h2.max_outbound_frame_size)
+                if window <= 0:
+                    break
+                chunk, call.pending = call.pending[:window], call.pending[window:]
+                self._h2.send_data(call.stream_id, bytes(chunk), end_stream=not call.pending)
+        return self._h2.data_to_send()
 
+    def feed(self, data: bytes) -> None:
+        """Process bytes read from the network."""
+        if not data:
+            self.dead = True
+            raise TransportError("connection closed by peer")
+        call = self._call
+        for event in self._h2.receive_data(data):
+            if isinstance(event, h2.events.ConnectionTerminated):
+                self.dead = True
+                raise TransportError(f"connection terminated by peer (error {event.error_code})")
+            if call is None or getattr(event, "stream_id", None) != call.stream_id:
+                continue
+            if isinstance(event, h2.events.DataReceived):
+                self._h2.acknowledge_received_data(event.flow_controlled_length, call.stream_id)
+                call.data += event.data
+            elif isinstance(event, h2.events.ResponseReceived):
+                call.headers = dict(event.headers)
+            elif isinstance(event, h2.events.TrailersReceived):
+                call.trailers = dict(event.headers)
+            elif isinstance(event, h2.events.StreamEnded):
+                call.ended = True
+            elif isinstance(event, h2.events.StreamReset):
+                self.dead = True
+                raise TransportError(f"stream reset by peer (error {event.error_code})")
+
+    @property
+    def done(self) -> bool:
+        return self._call is not None and self._call.ended
+
+    def result(self) -> bytes:
+        """The response message of the finished call, raises ``RpcError`` for non OK status."""
+        call = self._call
+        assert call is not None and call.ended
+        self._call = None
         return call.finish()
+
+    def abort(self) -> None:
+        """Forget the current call and mark the connection unusable."""
+        self._call = None
+        self.dead = True
+
+    def close(self) -> bytes:
+        self.dead = True
+        try:
+            self._h2.close_connection()
+            return self._h2.data_to_send()
+        except Exception:
+            return b""
+
+    # -- headers ---------------------------------------------------------------
 
     def _request_headers(
         self, path: str, timeout: float | None, metadata: Metadata | None, compression: str | None
@@ -173,55 +179,11 @@ class GrpcConnection:
                 headers.append((key, value))
         return headers
 
-    def _send_body(self, stream_id: int, body: bytes, deadline: float | None) -> None:
-        view = memoryview(body)
-        while view:
-            window = min(self._h2.local_flow_control_window(stream_id), self._h2.max_outbound_frame_size)
-            if window <= 0:
-                self._pump(None, stream_id, deadline)
-                continue
-            chunk = view[:window]
-            view = view[window:]
-            self._h2.send_data(stream_id, bytes(chunk), end_stream=not view)
-            self._flush()
-
-    def _pump(self, call: _Call | None, stream_id: int, deadline: float | None) -> None:
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise socket.timeout()
-            self._sock.settimeout(remaining)
-        data = self._sock.recv(_RECV_SIZE)
-        if not data:
-            raise TransportError("connection closed by peer")
-        for event in self._h2.receive_data(data):
-            if isinstance(event, h2.events.ConnectionTerminated):
-                self._dead = True
-                raise TransportError(f"connection terminated by peer (error {event.error_code})")
-            if getattr(event, "stream_id", None) != stream_id:
-                continue
-            if isinstance(event, h2.events.DataReceived):
-                self._h2.acknowledge_received_data(event.flow_controlled_length, stream_id)
-                if call is not None:
-                    call.data += event.data
-            elif isinstance(event, h2.events.ResponseReceived) and call is not None:
-                call.headers = dict(event.headers)
-            elif isinstance(event, h2.events.TrailersReceived) and call is not None:
-                call.trailers = dict(event.headers)
-            elif isinstance(event, h2.events.StreamEnded) and call is not None:
-                call.ended = True
-            elif isinstance(event, h2.events.StreamReset):
-                raise TransportError(f"stream reset by peer (error {event.error_code})")
-        self._flush()
-
-    def _flush(self) -> None:
-        data = self._h2.data_to_send()
-        if data:
-            self._sock.sendall(data)
-
 
 class _Call:
-    def __init__(self) -> None:
+    def __init__(self, stream_id: int, body: bytes) -> None:
+        self.stream_id = stream_id
+        self.pending = memoryview(body)
         self.headers: dict[str, str] = {}
         self.trailers: dict[str, str] = {}
         self.data = bytearray()
@@ -293,3 +255,11 @@ def _format_timeout(seconds: float) -> str:
         if value < 100_000_000:
             return f"{max(value, 1)}{unit}"
     return "99999999H"
+
+
+def tls_context() -> Any:
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.set_alpn_protocols(["h2"])
+    return ctx

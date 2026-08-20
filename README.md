@@ -10,8 +10,8 @@ protobuf wire format and lets you call the methods on any standard gRPC
 server. No `.proto` files, no code generation, no C extensions. The only
 dependency is the pure Python `h2` library.
 
-Current scope: struct serialization and unary calls from a sync client.
-Streaming, async and other protocols (thrift) come later, the public API is
+Current scope: struct serialization and unary calls from sync and asyncio
+clients. Streaming and other protocols (thrift) come later, the public API is
 kept protocol neutral for that.
 
 ## Install
@@ -122,6 +122,18 @@ service Greeter {
 - `client.close()` or `with grapec.Client(...) as client:` closes idle connections. `__del__` does the same as a fallback.
 - Compressed responses (`gzip`, `deflate`) are always accepted. Pass `compression="gzip"` to the client or to a single `call` to compress requests.
 
+### asyncio
+
+`grapec.AsyncClient` takes the same options and follows the same pooling rules:
+
+```python
+async with grapec.AsyncClient("grpc://localhost:50051") as client:
+    reply = await client.call(Greeter.say_hello, req, timeout=5)
+    replies = await asyncio.gather(*(client.call(Greeter.say_hello, r) for r in requests))
+```
+
+Use `await client.aclose()` when not using `async with`. Concurrent calls each get their own connection from the pool.
+
 Errors:
 
 - `grapec.RpcError` when the server answers with a non OK status. It carries `code` (`grapec.Status`, an `IntEnum` aligned with gRPC status codes), `message` and `details`. Deadline expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`.
@@ -174,6 +186,7 @@ Errors:
 cd examples/hello
 python server.py &
 python client.py
+python async_client.py
 ```
 
 ## Development

@@ -1,13 +1,12 @@
-"""The protocol neutral ``Client`` with a small connection pool."""
+"""The protocol neutral ``Client`` and ``AsyncClient``."""
 
 from __future__ import annotations
 
-import threading
-from typing import Any, Callable, Protocol, TypeVar
-from urllib.parse import urlsplit
+from typing import Any, Awaitable, Callable, Protocol, TypeVar
+from urllib.parse import SplitResult, urlsplit
 
-from ._errors import TransportError
-from ._service import method_of
+from ._pool import Pool
+from ._service import MethodSpec, method_of
 
 Req = TypeVar("Req")
 Resp = TypeVar("Resp")
@@ -16,7 +15,7 @@ Metadata = dict[str, str | bytes]
 
 
 class Connection(Protocol):
-    """What a transport must provide. One call at a time per connection."""
+    """What a sync transport provides. One call at a time per connection."""
 
     @property
     def healthy(self) -> bool: ...
@@ -34,26 +33,101 @@ class Connection(Protocol):
     ) -> bytes: ...
 
 
+class AsyncConnection(Protocol):
+    """What an async transport provides."""
+
+    @property
+    def healthy(self) -> bool: ...
+
+    def close(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+    async def unary(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> bytes: ...
+
+
 ConnectionFactory = Callable[[], Connection]
+AsyncConnectionFactory = Callable[[], Awaitable[AsyncConnection]]
 
 
-def _grpc_factory(url: Any, tls: bool, connect_timeout: float | None) -> ConnectionFactory:
-    from ._grpc import GrpcConnection
-
-    host = url.hostname
-    port = url.port or (443 if tls else 80)
-    if not host:
+def _host_port(url: SplitResult, default_port: int) -> tuple[str, int]:
+    if not url.hostname:
         raise ValueError(f"missing host in {url.geturl()!r}")
+    return url.hostname, url.port or default_port
+
+
+def _grpc_sync(url: SplitResult, tls: bool, connect_timeout: float | None) -> ConnectionFactory:
+    from ._sync import GrpcConnection
+
+    host, port = _host_port(url, 443 if tls else 80)
     return lambda: GrpcConnection(host, port, tls=tls, connect_timeout=connect_timeout)
 
 
-_SCHEMES: dict[str, Callable[[Any, float | None], ConnectionFactory]] = {
-    "grpc": lambda url, ct: _grpc_factory(url, False, ct),
-    "grpcs": lambda url, ct: _grpc_factory(url, True, ct),
+def _grpc_async(url: SplitResult, tls: bool, connect_timeout: float | None) -> AsyncConnectionFactory:
+    from ._async import AsyncGrpcConnection
+
+    host, port = _host_port(url, 443 if tls else 80)
+    return lambda: AsyncGrpcConnection(host, port, tls=tls).connect(connect_timeout)
+
+
+_SYNC_SCHEMES: dict[str, Callable[[SplitResult, float | None], ConnectionFactory]] = {
+    "grpc": lambda url, ct: _grpc_sync(url, False, ct),
+    "grpcs": lambda url, ct: _grpc_sync(url, True, ct),
+}
+_ASYNC_SCHEMES: dict[str, Callable[[SplitResult, float | None], AsyncConnectionFactory]] = {
+    "grpc": lambda url, ct: _grpc_async(url, False, ct),
+    "grpcs": lambda url, ct: _grpc_async(url, True, ct),
 }
 
 
-class Client:
+class _BaseClient:
+    """Options and request preparation shared by both clients."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        max_idle: int,
+        timeout: float | None,
+        connect_timeout: float | None,
+        compression: str | None,
+    ) -> None:
+        self.url = url
+        self.timeout = timeout
+        self.compression = compression
+        self._parsed = urlsplit(url)
+        self._connect_timeout = connect_timeout
+        self._pool: Pool[Any] = Pool(max_idle)
+
+    def _lookup(self, schemes: dict[str, Any]) -> Any:
+        try:
+            make = schemes[self._parsed.scheme]
+        except KeyError:
+            raise ValueError(f"unsupported scheme {self._parsed.scheme!r} in {self.url!r}") from None
+        return make(self._parsed, self._connect_timeout)
+
+    def _prepare(self, method: Any, request: Any, timeout: float | None, compression: str | None) -> tuple[MethodSpec, bytes, float | None, str | None]:
+        spec = method_of(method)
+        if not isinstance(request, spec.request):
+            raise TypeError(f"{spec.path} expects {spec.request.__qualname__}, got {type(request).__qualname__}")
+        payload = request.to_bytes()
+        return (
+            spec,
+            payload,
+            self.timeout if timeout is None else timeout,
+            self.compression if compression is None else compression,
+        )
+
+
+class Client(_BaseClient):
     """Call methods of ``@grapec.service`` classes over the network.
 
     ``url`` selects the protocol by scheme, for example ``grpc://host:50051``
@@ -74,19 +148,8 @@ class Client:
         connect_timeout: float | None = 10,
         compression: str | None = None,
     ) -> None:
-        parsed = urlsplit(url)
-        try:
-            make = _SCHEMES[parsed.scheme]
-        except KeyError:
-            raise ValueError(f"unsupported scheme {parsed.scheme!r} in {url!r}") from None
-        self.url = url
-        self.timeout = timeout
-        self.compression = compression
-        self._factory = make(parsed, connect_timeout)
-        self._max_idle = max_idle
-        self._idle: list[Connection] = []
-        self._lock = threading.Lock()
-        self._closed = False
+        super().__init__(url, max_idle=max_idle, timeout=timeout, connect_timeout=connect_timeout, compression=compression)
+        self._factory: ConnectionFactory = self._lookup(_SYNC_SCHEMES)
 
     def call(
         self,
@@ -98,15 +161,7 @@ class Client:
         compression: str | None = None,
     ) -> Resp:
         """Invoke ``method`` (for example ``Greeter.say_hello``) with ``request``."""
-        spec = method_of(method)
-        if not isinstance(request, spec.request):
-            raise TypeError(f"{spec.path} expects {spec.request.__qualname__}, got {type(request).__qualname__}")
-        if timeout is None:
-            timeout = self.timeout
-        if compression is None:
-            compression = self.compression
-
-        payload = request.to_bytes()  # type: ignore[attr-defined]
+        spec, payload, timeout, compression = self._prepare(method, request, timeout, compression)
         conn = self._acquire()
         try:
             raw = conn.unary(spec.path, payload, timeout=timeout, metadata=metadata, compression=compression)
@@ -115,10 +170,7 @@ class Client:
         return spec.response.from_bytes(raw)  # type: ignore[no-any-return]
 
     def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            idle, self._idle = self._idle, []
-        for conn in idle:
+        for conn in self._pool.drain():
             conn.close()
 
     def __enter__(self) -> "Client":
@@ -134,25 +186,81 @@ class Client:
             pass
 
     def _acquire(self) -> Connection:
-        while True:
-            with self._lock:
-                if self._closed:
-                    raise TransportError("client is closed")
-                if not self._idle:
-                    break
-                conn = self._idle.pop()
+        while (conn := self._pool.take()) is not None:
             if conn.healthy:
                 return conn
             conn.close()
         return self._factory()
 
     def _release(self, conn: Connection) -> None:
-        keep = conn.healthy
-        if keep:
-            with self._lock:
-                if self._closed or len(self._idle) >= self._max_idle:
-                    keep = False
-                else:
-                    self._idle.append(conn)
-        if not keep:
+        if not (conn.healthy and self._pool.give_back(conn)):
             conn.close()
+
+
+class AsyncClient(_BaseClient):
+    """asyncio twin of :class:`Client`, same options and pooling rules.
+
+    ``await client.call(...)``, ``await client.aclose()`` or
+    ``async with grapec.AsyncClient(...) as client:``.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        max_idle: int = 4,
+        timeout: float | None = None,
+        connect_timeout: float | None = 10,
+        compression: str | None = None,
+    ) -> None:
+        super().__init__(url, max_idle=max_idle, timeout=timeout, connect_timeout=connect_timeout, compression=compression)
+        self._factory: AsyncConnectionFactory = self._lookup(_ASYNC_SCHEMES)
+
+    async def call(
+        self,
+        method: Callable[[Any, Req], Resp],
+        request: Req,
+        *,
+        timeout: float | None = None,
+        metadata: Metadata | None = None,
+        compression: str | None = None,
+    ) -> Resp:
+        spec, payload, timeout, compression = self._prepare(method, request, timeout, compression)
+        conn = await self._acquire()
+        try:
+            raw = await conn.unary(spec.path, payload, timeout=timeout, metadata=metadata, compression=compression)
+        finally:
+            await self._release(conn)
+        return spec.response.from_bytes(raw)  # type: ignore[no-any-return]
+
+    async def aclose(self) -> None:
+        for conn in self._pool.drain():
+            await conn.aclose()
+
+    def close(self) -> None:
+        """Drop idle connections without waiting, for use outside the event loop."""
+        for conn in self._pool.drain():
+            conn.close()
+
+    async def __aenter__(self) -> "AsyncClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    async def _acquire(self) -> AsyncConnection:
+        while (conn := self._pool.take()) is not None:
+            if conn.healthy:
+                return conn
+            conn.close()
+        return await self._factory()
+
+    async def _release(self, conn: AsyncConnection) -> None:
+        if not (conn.healthy and self._pool.give_back(conn)):
+            await conn.aclose()

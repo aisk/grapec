@@ -11,13 +11,15 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/_dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
 - `src/grapec/_proto.py`: `export_proto`, renders structs and services as proto3 source.
 - `src/grapec/_service.py`: the `@service(package=...)` and `@name(...)` decorators, resolves method signatures into `MethodSpec`.
-- `src/grapec/_client.py`: protocol neutral `Client` with a small connection pool and the `Connection` protocol transports implement. Maps URL schemes to transports.
-- `src/grapec/_grpc.py`: gRPC over HTTP/2 transport on top of `h2`, the only place that knows gRPC framing and headers.
+- `src/grapec/_client.py`: protocol neutral `Client` and `AsyncClient`, the `Connection` / `AsyncConnection` protocols transports implement, and the URL scheme to transport mapping.
+- `src/grapec/_pool.py`: idle connection bookkeeping shared by both clients.
+- `src/grapec/_grpc.py`: sans-IO gRPC over HTTP/2 state machine on top of `h2`, the only place that knows gRPC framing and headers. Never touches a socket.
+- `src/grapec/_sync.py` and `src/grapec/_async.py`: thin blocking socket and asyncio shells around `GrpcProtocol`.
 - `src/grapec/_errors.py`: `Status`, `RpcError`, `TransportError`.
-- `examples/hello/`: demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` uses grapec only.
+- `examples/hello/`: demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
 - `tests/`: pytest suite. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server.
 
-Keep the schema layer free of wire format details and the client free of gRPC details so other protocols (thrift) and an async client can be added without touching the public API.
+Keep the schema layer free of wire format details, the clients free of gRPC details, and protocol state machines free of IO, so other protocols (thrift) plug in by adding a sans-IO protocol plus two thin IO shells.
 
 ## Build, Test, and Development Commands
 - `uv sync`: create/update the virtual environment.
@@ -34,6 +36,7 @@ Keep the schema layer free of wire format details and the client free of gRPC de
 ## Testing Guidelines
 - Add tests under `tests/`, name files `test_*.py`, cover normal and failure cases.
 - Wire format changes must be checked against the protobuf oracle, extend `tests/oracle.proto` when adding types.
+- Transport behaviour is tested against a real grpcio server (`rpc_server` fixture). Cover both `Client` and `AsyncClient`, async tests use `pytest-asyncio` in strict mode.
 - Run `uv run pytest` before opening a PR.
 
 ## Commit & Pull Request Guidelines

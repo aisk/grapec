@@ -142,7 +142,7 @@ def test_not_a_service_method(client):
 def test_pool_reuses_connections(client):
     for _ in range(3):
         client.call(Greeter.say_hello, HelloRequest(name="x"))
-    assert len(client._idle) == 1
+    assert len(client._pool) == 1
 
 
 def test_pool_concurrent_calls(rpc_server):
@@ -158,7 +158,7 @@ def test_pool_concurrent_calls(rpc_server):
         for t in threads:
             t.join()
         assert sorted(results) == sorted(f"hello {i} 0" for i in range(8))
-        assert len(c._idle) <= 2
+        assert len(c._pool) <= 2
 
 
 def test_closed_client(rpc_server):

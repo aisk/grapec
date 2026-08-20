@@ -21,7 +21,7 @@ Example::
     reply = client.call(Greeter.say_hello, HelloRequest(name="x"))
 """
 
-from ._client import Client
+from ._client import AsyncClient, Client
 from ._codec import EncodeError
 from ._errors import GrapecError, RpcError, Status, TransportError
 from ._proto import export_proto
@@ -38,6 +38,7 @@ __all__ = [
     "name",
     "export_proto",
     "Client",
+    "AsyncClient",
     "Status",
     "GrapecError",
     "RpcError",

@@ -1,6 +1,6 @@
 [project]
 name = "grapec"
-version = "0.5.0"
+version = "0.6.0"
 description = "Declare plain Python classes and serialize them for cross language RPC"
 readme = "README.md"
 authors = [
@@ -20,4 +20,9 @@ dev = [
     "pytest>=8.4.2",
     "grpcio-tools>=1.73.0",
     "grpcio>=1.78.0",
+    "pytest-asyncio>=1.4.0",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
