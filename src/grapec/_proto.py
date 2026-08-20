@@ -24,7 +24,7 @@ from ._schema import (
     is_struct,
     schema_of,
 )
-from ._service import METHOD_ATTR, SERVICE_ATTR, MethodSpec, ServiceSpec
+from ._service import SERVICE_ATTR, MethodSpec, ServiceSpec, remote_methods
 
 _SCALAR_NAMES = {"int": "int64", "float": "double", "str": "string", "bytes": "bytes", "bool": "bool"}
 
@@ -34,7 +34,8 @@ def export_proto(*roots: type) -> str:
 
     All roots must live in the same package. Structs from other packages are
     referenced by their full name and pulled in with ``import`` statements
-    named ``<package path>.proto``.
+    named ``<package path>.proto``. Python enums carry no package, each enum
+    belongs to the package of the first struct that references it.
     """
     if not roots:
         raise ValueError("export_proto needs at least one struct or service")
@@ -42,7 +43,7 @@ def export_proto(*roots: type) -> str:
     services: list[ServiceSpec] = []
     methods: list[MethodSpec] = []
     structs: dict[type, StructSchema] = {}
-    enums: dict[type, None] = {}
+    enums: dict[type, str] = {}
     package: str | None = None
 
     def visit_struct(cls: type) -> None:
@@ -51,32 +52,31 @@ def export_proto(*roots: type) -> str:
         schema = schema_of(cls)
         structs[cls] = schema
         for field in schema.fields:
-            visit_type(field.type)
+            visit_type(field.type, schema.package)
 
-    def visit_type(spec: TypeSpec) -> None:
+    def visit_type(spec: TypeSpec, pkg: str) -> None:
         match spec:
             case StructType(cls):
                 visit_struct(cls)
             case EnumType(cls):
-                enums.setdefault(cls)
+                enums.setdefault(cls, pkg)
             case ListType(item):
-                visit_type(item)
+                visit_type(item, pkg)
             case MapType(_, value):
-                visit_type(value)
+                visit_type(value, pkg)
             case OneOfType(members):
                 for m in members:
-                    visit_type(m.type)
+                    visit_type(m.type, pkg)
 
     for root in roots:
         svc = getattr(root, SERVICE_ATTR, None)
         if svc is not None:
             services.append(svc)
-            for value in vars(root).values():
-                spec = getattr(value, METHOD_ATTR, None)
-                if spec is not None:
-                    methods.append(spec)
-                    visit_struct(spec.request)
-                    visit_struct(spec.response)
+            for value in remote_methods(root).values():
+                spec = value.spec
+                methods.append(spec)
+                visit_struct(spec.request)
+                visit_struct(spec.response)
             pkg = svc.package
         elif is_struct(root):
             visit_struct(root)
@@ -90,7 +90,9 @@ def export_proto(*roots: type) -> str:
 
     assert package is not None
     local = [s for s in structs.values() if s.package == package]
-    foreign = sorted({s.package for s in structs.values() if s.package != package})
+    local_enums = [cls for cls, pkg in enums.items() if pkg == package]
+    foreign = sorted(({s.package for s in structs.values()} | set(enums.values())) - {package})
+    _check_enum_names(local_enums, package)
 
     needs_timestamp = needs_duration = False
 
@@ -100,7 +102,8 @@ def export_proto(*roots: type) -> str:
             case ScalarType(kind):
                 return _SCALAR_NAMES[kind]
             case EnumType(cls):
-                return cls.__name__
+                pkg = enums[cls]
+                return cls.__name__ if pkg == package else f"{pkg}.{cls.__name__}"
             case StructType(cls):
                 schema = structs[cls]
                 return cls.__name__ if schema.package == package else schema.full_name
@@ -115,7 +118,7 @@ def export_proto(*roots: type) -> str:
         raise AssertionError(spec)
 
     body: list[str] = []
-    for cls in enums:
+    for cls in local_enums:
         body.append(_render_enum(cls))
     for schema in sorted(local, key=lambda s: s.cls.__name__):
         body.append(_render_message(schema, type_name))
@@ -140,13 +143,32 @@ def export_proto(*roots: type) -> str:
     return "\n".join(head) + "\n\n" + "\n\n".join(body) + "\n"
 
 
+def _check_enum_names(enums: list[type[enum.IntEnum]], package: str) -> None:
+    """Enum values share one scope per package in proto, names must not repeat."""
+    owner: dict[str, type] = {}
+    for cls in enums:
+        for member_name in cls.__members__:
+            other = owner.setdefault(member_name, cls)
+            if other is not cls:
+                raise SchemaError(
+                    f"enum value {member_name!r} is defined by both {other.__name__} and {cls.__name__} "
+                    f"in package {package!r}. proto enum values share one scope per package, "
+                    f"rename one of them, for example {cls.__name__.upper()}_{member_name}"
+                )
+
+
 def _render_enum(cls: type[enum.IntEnum]) -> str:
     lines = [f"enum {cls.__name__} {{"]
-    values = list(cls)
-    if not values or values[0].value != 0:
+    members = list(cls.__members__.items())
+    if len(members) > len(list(cls)):
+        lines.append("  option allow_alias = true;")
+    values = {m.value for m in cls}
+    if 0 not in values:
         lines.append(f"  {cls.__name__.upper()}_UNSPECIFIED = 0;")
-    for member in values:
-        lines.append(f"  {member.name} = {member.value};")
+    # proto3 wants the zero value first
+    members.sort(key=lambda item: item[1].value != 0)
+    for member_name, member in members:
+        lines.append(f"  {member_name} = {member.value};")
     lines.append("}")
     return "\n".join(lines)
 
@@ -170,4 +192,3 @@ def _render_message(schema: StructSchema, type_name: Any) -> str:
                 lines.append(f"  {prefix}{type_name(spec)} {field.name} = {field.number};")
     lines.append("}")
     return "\n".join(lines)
-

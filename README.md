@@ -112,10 +112,13 @@ service Greeter {
 
 - Declare a service by subclassing `grapec.Client` with a `package=` class argument. Each public method takes one struct and returns a struct. Bodies are never executed, `...` is enough. The base class owns `__init__` and has no public attributes of its own, so method names cannot clash with it.
 - Names are used as is on the wire. `@grapec.name("SayHello")` on a method or `name="Greeter"` next to `package=` pick a different wire name.
-- `Greeter(url, max_idle=4, timeout=None, connect_timeout=10, compression=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS.
-- Every method accepts `timeout=`, `metadata=` and `compression=` keyword arguments at runtime. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
+- `Greeter(url, max_idle=4, max_idle_time=60, timeout=None, connect_timeout=10, compression=None, ssl=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS. `ssl` takes an `ssl.SSLContext` for private CAs or client certificates, the default context verifies against the system trust store. grapec sets ALPN to `h2` on the context it is given.
+- Every method accepts `timeout=`, `metadata=`, `compression=` and `details=` keyword arguments at runtime. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
 - `metadata` is a dict of header values. Binary values must be `bytes` under a key ending in `-bin`.
-- Connections are pooled per client. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. A connection that fails at the transport level is dropped, the error is raised and never retried.
+- Connections are pooled per client. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. Before an idle connection is reused, anything the server sent in the meantime (GOAWAY, a closed socket) is processed without blocking and a connection that turned out dead is replaced silently. Idle connections older than `max_idle_time` seconds are closed. A connection that fails during a call is dropped, the error is raised and never retried.
+- A deadline that expires cancels the stream and keeps the connection.
+- Pass a `grapec.CallDetails()` as `details=` to receive the response headers and trailers: `d = grapec.CallDetails(); greeter.say_hello(req, details=d); d.trailers["x-request-id"]`. Binary values (`-bin` keys) come back as `bytes`. For a trailers-only response everything is reported as trailers, like other gRPC clients do.
+- Subclassing a client class inherits its methods. Pass `name=` on the subclass to call the inherited methods under the new service name, without it they keep the parent's paths.
 - To share one pool between several clients, create a `grapec.Session(url, ...)` and pass it instead of a URL: `Greeter(session)`, `Orders(session)`.
 - `grapec.close(greeter)` closes the session a client created from a URL. Shared sessions are closed with `session.close()`. Garbage collection closes owned sessions as a fallback.
 - Compressed responses (`gzip`, `deflate`) are always accepted. Pass `compression="gzip"` to the client or to a single call to compress requests.
@@ -141,7 +144,7 @@ Same options and pooling rules. Concurrent calls each get their own connection f
 
 Errors:
 
-- `grapec.RpcError` when the server answers with a non OK status. It carries `code` (`grapec.Status`, an `IntEnum` aligned with gRPC status codes), `message` and `details`. Deadline expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`.
+- `grapec.RpcError` when the server answers with a non OK status. It carries `code` (`grapec.Status`, an `IntEnum` aligned with gRPC status codes), `message`, `details`, and the response metadata as `headers` and `trailers`. Deadline expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`.
 - `grapec.TransportError` when the connection itself fails (refused, reset, protocol error).
 
 ## Struct rules
@@ -151,17 +154,17 @@ Errors:
 - Fields without a default are required when constructing, like a dataclass. `list` and `dict` fields default to empty, `T | None` fields default to `None`.
 - When decoding, a missing field becomes the zero value (`0`, `""`, `False`, empty list, default instance). A missing `T | None` field becomes `None`.
 - Unknown fields in the input are skipped, unknown enum values are kept as plain `int`.
-- A union of several types is a `oneof`. Each member gets its own field number (consecutive by default, or `Annotated[A, Id(7)] | Annotated[B, Id(9)]`). Members must be distinguishable by type, so structs and distinct scalars are fine, `int | bool` is not. On the proto side the members are named `<field>_<type>`, for example `choice_inner` and `choice_str`. A missing oneof decodes as `None` even when `None` is not in the union.
+- A union of several types is a `oneof`. Each member gets its own field number (consecutive by default, or `Annotated[A, Id(7)] | Annotated[B, Id(9)]`). Members must be distinguishable by type, so structs and distinct scalars are fine, `int | bool` is not. On the proto side the members are named `<field>_<type>`, for example `choice_inner` and `choice_str`. A oneof always has presence, so the field defaults to `None`, `None` encodes as "not set" and a missing oneof decodes as `None`, whether or not `None` is written in the union.
 
 ## Dict and JSON
 
 - `to_dict()` / `from_dict()` use Python field names and Python values (`IntEnum`, `datetime`, `bytes`).
 - `to_json()` / `from_json()` follow the proto3 JSON mapping: lowerCamelCase keys, `int` as strings, `bytes` as base64, RFC 3339 timestamps, `"1.5s"` durations, enum names, default values omitted, oneof members under their proto side names.
-- `from_dict()` accepts both shapes, so `json.loads` output from any protobuf implementation works too.
+- `from_dict()` accepts both shapes, so `json.loads` output from any protobuf implementation works too. Nested values may be dicts or struct instances. `null` means "not set": the zero value for plain fields, `None` for `T | None` fields and oneofs.
 
 ## Exporting a .proto
 
-`grapec.export_proto(Greeter, OtherStruct, ...)` renders proto3 source for the given structs and client classes and everything they reference. All roots must share one package, structs from other packages are referenced by full name with an `import "<package/path>.proto"`. The output is compiled with `protoc` in the test suite and checked to parse grapec's bytes identically.
+`grapec.export_proto(Greeter, OtherStruct, ...)` renders proto3 source for the given structs and client classes and everything they reference. All roots must share one package, structs from other packages are referenced by full name with an `import "<package/path>.proto"`. Python enums carry no package, an enum belongs to the package of the first struct that references it. proto enum values share one scope per package, so two enums of one package must not reuse a value name (`Priority.UNSPECIFIED` and `Color.UNSPECIFIED` together are rejected with a hint to rename, the usual convention is `PRIORITY_UNSPECIFIED`). Enums with aliases get `option allow_alias = true`, enums without a zero value get a generated `<NAME>_UNSPECIFIED = 0`. The output is compiled with `protoc` in the test suite and checked to parse grapec's bytes identically.
 
 ## Type mapping
 
@@ -201,4 +204,4 @@ uv sync
 uv run pytest
 ```
 
-Tests compile `tests/oracle.proto` and `tests/rpc.proto` with `grpcio-tools`. Serialization is compared byte for byte against the official protobuf implementation and the client is exercised against a real grpcio server.
+Tests compile `tests/oracle.proto` and `tests/rpc.proto` with `grpcio-tools`. Serialization is compared byte for byte against the official protobuf implementation and the client is exercised against a real grpcio server, plaintext and TLS (the TLS tests generate a self signed certificate with `openssl` and are skipped without it).

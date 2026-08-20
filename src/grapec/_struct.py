@@ -55,7 +55,7 @@ def _from_bytes(cls: type[T], data: bytes | bytearray | memoryview) -> T:
 
 
 def _inject_defaults(cls: type) -> None:
-    """Give list, dict and optional fields an implicit default.
+    """Give list, dict, optional and oneof fields an implicit default.
 
     Everything else stays required, like a regular dataclass.
     """
@@ -82,10 +82,9 @@ def _inject_defaults(cls: type) -> None:
 def _classify(hint: Any) -> str | None:
     inner, _ = split_annotated(hint)
     members, optional = split_union(inner)
-    if optional:
+    if optional or len(members) > 1:
+        # `T | None` and oneofs (`A | B`) both default to None
         return "optional"
-    if len(members) != 1:
-        return None
     inner, _ = split_annotated(members[0])
     origin = getattr(inner, "__origin__", None)
     if origin is list:
@@ -101,10 +100,23 @@ def _classify_string(raw: Any) -> str | None:
     text = raw.strip()
     if text.startswith("Annotated["):
         text = text[len("Annotated[") :].split(",", 1)[0].strip()
-    if _STRING_OPTIONAL.search(text):
+    if _STRING_OPTIONAL.search(text) or _top_level_union(text) or text.startswith(("Union[", "typing.Union[")):
         return "optional"
     if _STRING_LIST.match(text):
         return "list"
     if _STRING_DICT.match(text):
         return "dict"
     return None
+
+
+def _top_level_union(text: str) -> bool:
+    """True for ``A | B`` but not for ``list[A | B]``."""
+    depth = 0
+    for ch in text:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "|" and depth == 0:
+            return True
+    return False

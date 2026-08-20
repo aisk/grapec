@@ -96,7 +96,7 @@ def _encode_field(out: bytearray, field: FieldSpec, value: Any, *, where: str) -
     if not field.optional and isinstance(spec, ScalarType) and value == zero_value(spec):
         # proto3 implicit presence, default values are not written
         return
-    if not field.optional and isinstance(spec, EnumType) and int(value) == 0:
+    if not field.optional and isinstance(spec, EnumType) and _check_int(value, where) == 0:
         return
 
     _encode_single(out, number, spec, value, where)
@@ -107,7 +107,7 @@ def _encode_packed_item(spec: TypeSpec, value: Any, where: str) -> bytes:
         case ScalarType(kind="float"):
             return w.encode_double(_check(value, (int, float), where))
         case ScalarType(kind="bool"):
-            return w.encode_varint(1 if value else 0)
+            return w.encode_varint(1 if _check(value, bool, where) else 0)
         case ScalarType(kind="int"):
             return w.encode_varint(_check_int(value, where))
         case EnumType():
@@ -122,7 +122,7 @@ def _encode_single(out: bytearray, number: int, spec: TypeSpec, value: Any, wher
             out += w.encode_varint(_check_int(value, where))
         case ScalarType(kind="bool"):
             out += w.encode_tag(number, w.VARINT)
-            out += w.encode_varint(1 if value else 0)
+            out += w.encode_varint(1 if _check(value, bool, where) else 0)
         case ScalarType(kind="float"):
             out += w.encode_tag(number, w.FIXED64)
             out += w.encode_double(_check(value, (int, float), where))
@@ -197,7 +197,7 @@ def decode(cls: type, data: bytes | bytearray | memoryview) -> Any:
 
 
 def _decode_struct(schema: StructSchema, buf: bytes) -> Any:
-    by_number = schema.by_number()
+    by_number = schema.by_number
     values: dict[str, Any] = {}
     pos = 0
     while pos < len(buf):

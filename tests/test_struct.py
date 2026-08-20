@@ -1,4 +1,5 @@
 import enum
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -297,16 +298,16 @@ def test_oneof_rejects_foreign_value():
         bytes(v)
 
 
-def test_oneof_required_rejects_none():
+def test_oneof_is_optional_by_default():
     @grapec.struct(package="t")
     class S:
         kind: Inner | str
 
-    with pytest.raises(TypeError):
-        S()  # type: ignore[call-arg]
-    with pytest.raises(grapec.EncodeError):
-        bytes(S(kind=None))  # type: ignore[arg-type]
+    assert S().kind is None
+    assert bytes(S()) == b""
     assert S.from_bytes(b"").kind is None
+    assert S.from_bytes(bytes(S.from_bytes(b""))) == S()
+    assert S.from_bytes(bytes(S(kind="x"))).kind == "x"
 
 
 def test_oneof_explicit_ids():
@@ -319,3 +320,74 @@ def test_oneof_explicit_ids():
 
     numbers = [f.numbers() for f in schema_of(S).fields]
     assert numbers == [(7, 9), (10,)]
+
+
+def test_tenth_varint_byte_is_masked_to_64_bits(oracle):
+    # field 2 (weight), a varint whose tenth byte carries bits above 64
+    data = bytes([0x10]) + b"\xff" * 9 + b"\x7f"
+    msg = oracle.Inner()
+    msg.ParseFromString(data)
+    v = Inner.from_bytes(data)
+    assert v.weight == msg.weight == -1
+    assert Inner.from_bytes(bytes(v)) == v
+
+
+def test_bool_and_enum_fields_check_types():
+    @grapec.struct(package="t")
+    class S:
+        flag: bool
+        flags: list[bool]
+        color: Color
+
+    with pytest.raises(grapec.EncodeError):
+        bytes(S(flag="no", flags=[], color=Color.RED))  # type: ignore[arg-type]
+    with pytest.raises(grapec.EncodeError):
+        bytes(S(flag=True, flags=[1], color=Color.RED))  # type: ignore[list-item]
+    with pytest.raises(grapec.EncodeError):
+        bytes(S(flag=True, flags=[], color="RED"))  # type: ignore[arg-type]
+
+
+def test_optional_list_items_have_a_clear_error():
+    @grapec.struct(package="t")
+    class S:
+        xs: list[Inner | None]
+
+    with pytest.raises(grapec.SchemaError, match="list items cannot be optional"):
+        S.from_bytes(b"")
+
+
+def test_by_number_is_cached():
+    from grapec._schema import schema_of
+
+    schema = schema_of(Inner)
+    assert schema.by_number is schema.by_number
+
+
+def test_string_annotations_give_oneof_a_default(tmp_path):
+    import importlib.util
+
+    source = (
+        "from __future__ import annotations\n"
+        "import grapec\n"
+        "@grapec.struct(package='t')\n"
+        "class S:\n"
+        "    kind: Inner | str\n"
+        "    xs: list[int]\n"
+        "    n: int\n"
+        "@grapec.struct(package='t')\n"
+        "class Inner:\n"
+        "    x: int\n"
+    )
+    path = tmp_path / "future_structs.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location("future_structs", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # type hints resolve through sys.modules
+    try:
+        spec.loader.exec_module(mod)
+        s = mod.S(n=1)
+        assert s.kind is None and s.xs == []
+        assert mod.S.from_bytes(bytes(s)) == s
+        assert mod.S.from_bytes(bytes(mod.S(n=1, kind=mod.Inner(x=2)))).kind == mod.Inner(x=2)
+    finally:
+        del sys.modules[spec.name]

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import functools
 import types
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -147,6 +148,7 @@ class StructSchema:
     def full_name(self) -> str:
         return f"{self.package}.{self.cls.__name__}"
 
+    @functools.cached_property
     def by_number(self) -> dict[int, tuple[FieldSpec, Member | None]]:
         out: dict[int, tuple[FieldSpec, Member | None]] = {}
         for f in self.fields:
@@ -223,12 +225,12 @@ def resolve_type(tp: Any, *, where: str) -> TypeSpec:
 
     if origin is list:
         (item,) = get_args(tp) or (Any,)
+        _, opt = split_union(split_annotated(item)[0])
+        if opt:
+            raise SchemaError(f"{where}: list items cannot be optional")
         item_spec = resolve_type(item, where=where)
         if isinstance(item_spec, (ListType, MapType)):
             raise SchemaError(f"{where}: nested list/dict inside list is not supported")
-        inner, opt = split_optional(split_annotated(item)[0])
-        if opt:
-            raise SchemaError(f"{where}: list items cannot be optional")
         return ListType(item_spec)
 
     if origin is dict:
@@ -309,7 +311,8 @@ def build_schema(cls: type) -> StructSchema:
 
         if len(members) > 1:
             spec = _resolve_oneof(members, take_number, where=where)
-            fields.append(FieldSpec(name, spec.members[0].number, spec, optional))
+            # a oneof always has presence, an unset one is None
+            fields.append(FieldSpec(name, spec.members[0].number, spec, True))
             continue
 
         inner, more = split_annotated(members[0])

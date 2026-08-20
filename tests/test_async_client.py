@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 
 import pytest
 import pytest_asyncio
@@ -118,3 +119,60 @@ async def test_wrong_session_type(url):
 async def test_wrong_request_type(greeter):
     with pytest.raises(TypeError):
         await greeter.say_hello(HelloReply(message="x"))  # type: ignore[arg-type]
+
+
+def _idle_connection(client):
+    return grapec.session_of(client)._pool._idle[0][0]
+
+
+async def test_cancellation_does_not_poison_the_pool(greeter):
+    await greeter.say_hello(HelloRequest(name="warm"))
+    task = asyncio.ensure_future(greeter.slow(HelloRequest(name="x")))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(grapec.session_of(greeter)._pool) == 0
+    assert (await greeter.say_hello(HelloRequest(name="after"))).message == "hello after 0"
+
+
+async def test_timeout_keeps_connection(greeter):
+    await greeter.say_hello(HelloRequest(name="warm"))
+    conn = _idle_connection(greeter)
+    with pytest.raises(grapec.RpcError):
+        await greeter.slow(HelloRequest(name="x"), timeout=0.2)
+    assert _idle_connection(greeter) is conn
+    assert (await greeter.say_hello(HelloRequest(name="after"))).message == "hello after 0"
+    assert _idle_connection(greeter) is conn
+
+
+async def test_stale_connection_after_goaway_is_dropped(serve):
+    url = f"grpc://127.0.0.1:{serve([('grpc.max_connection_age_ms', 200), ('grpc.max_connection_age_grace_ms', 100)])}"
+    g = AsyncGreeter(url)
+    assert (await g.say_hello(HelloRequest(name="a"))).message == "hello a 0"
+    first = _idle_connection(g)
+    await asyncio.sleep(0.8)
+    assert (await g.say_hello(HelloRequest(name="b"))).message == "hello b 0"
+    assert _idle_connection(g) is not first
+    await grapec.aclose(g)
+
+
+async def test_call_details_and_error_metadata(greeter):
+    details = grapec.CallDetails()
+    await greeter.say_hello(HelloRequest(name="d"), details=details)
+    assert details.headers["x-initial"] == "yes"
+    assert details.trailers["x-echo"] == "d"
+    with pytest.raises(grapec.RpcError) as info:
+        await greeter.fail(HelloRequest(name="e"))
+    assert info.value.trailers["x-reason"] == "test"
+
+
+async def test_tls(tls_rpc_server):
+    port, cert = tls_rpc_server
+    ctx = ssl.create_default_context(cafile=str(cert))
+    g = AsyncGreeter(f"grpcs://localhost:{port}", ssl=ctx)
+    assert (await g.say_hello(HelloRequest(name="tls"))).message == "hello tls 0"
+    await grapec.aclose(g)
+    g = AsyncGreeter(f"grpcs://localhost:{port}", connect_timeout=2)
+    with pytest.raises(grapec.TransportError):
+        await g.say_hello(HelloRequest(name="tls"))

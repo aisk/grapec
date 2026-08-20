@@ -24,7 +24,7 @@ from ._codec import EncodeError
 from ._errors import GrapecError, RpcError, Status, TransportError
 from ._proto import export_proto
 from ._schema import Id, SchemaError, is_struct
-from ._service import AsyncClient, CallOptions, Client, aclose, close, name, session_of
+from ._service import AsyncClient, CallDetails, CallOptions, Client, aclose, close, name, session_of
 from ._session import AsyncSession, Session
 from ._struct import struct
 from ._wire import WireError
@@ -37,6 +37,7 @@ __all__ = [
     "AsyncClient",
     "name",
     "CallOptions",
+    "CallDetails",
     "close",
     "aclose",
     "session_of",

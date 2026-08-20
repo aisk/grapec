@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from typing import Any
 
 
 class Status(enum.IntEnum):
@@ -32,13 +33,27 @@ class GrapecError(Exception):
 
 
 class RpcError(GrapecError):
-    """The remote side answered the call with a non OK status."""
+    """The remote side answered the call with a non OK status.
 
-    def __init__(self, code: Status, message: str = "", details: bytes = b"") -> None:
+    ``headers`` and ``trailers`` hold the response metadata the server sent
+    along with the status, binary values (``-bin`` keys) are ``bytes``.
+    """
+
+    def __init__(
+        self,
+        code: Status,
+        message: str = "",
+        details: bytes = b"",
+        *,
+        headers: dict[str, Any] | None = None,
+        trailers: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(f"{code.name}: {message}" if message else code.name)
         self.code = code
         self.message = message
         self.details = details
+        self.headers: dict[str, str | bytes] = dict(headers or {})
+        self.trailers: dict[str, str | bytes] = dict(trailers or {})
 
 
 class TransportError(GrapecError):

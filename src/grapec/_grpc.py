@@ -9,6 +9,7 @@ it and the network.
 from __future__ import annotations
 
 import base64
+import binascii
 import gzip
 import struct as _struct
 import zlib
@@ -17,6 +18,7 @@ from urllib.parse import unquote
 
 import h2.config
 import h2.connection
+import h2.errors
 import h2.events
 import h2.exceptions
 
@@ -40,6 +42,16 @@ Metadata = dict[str, str | bytes]
 # errors from the IO layer or h2 that mean the connection is unusable
 IO_ERRORS = (OSError, h2.exceptions.H2Error, EOFError)
 
+_FRAME_HEADER = 9
+_CLOSED = h2.connection.ConnectionState.CLOSED
+# transport level trailers that are reported through RpcError / the payload
+_STATUS_KEYS = frozenset({"grpc-status", "grpc-message", "grpc-status-details-bin"})
+
+
+def authority(host: str, port: int) -> str:
+    """``host:port`` for the ``:authority`` header, IPv6 literals get brackets."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
 
 class GrpcProtocol:
     """Sans-IO gRPC client state for one HTTP/2 connection, one call at a time."""
@@ -53,12 +65,18 @@ class GrpcProtocol:
         self._h2.initiate_connection()
         self.dead = False
         self._call: _Call | None = None
+        self._inbuf = bytearray()
 
     @property
     def healthy(self) -> bool:
         if self.dead:
             return False
-        return self._h2.state_machine.state is not h2.connection.ConnectionState.CLOSED
+        return self._h2.state_machine.state is not _CLOSED
+
+    @property
+    def busy(self) -> bool:
+        """A call was started and neither finished, cancelled nor aborted."""
+        return self._call is not None
 
     # -- driving the connection ----------------------------------------------
 
@@ -83,14 +101,15 @@ class GrpcProtocol:
         else:
             compression = None
             flag = 0
+        headers = self._request_headers(path, timeout, metadata, compression)
         stream_id = self._h2.get_next_available_stream_id()
-        self._h2.send_headers(stream_id, self._request_headers(path, timeout, metadata, compression))
+        self._h2.send_headers(stream_id, headers)
         self._call = _Call(stream_id, _struct.pack(">BI", flag, len(payload)) + payload)
 
     def data_to_send(self) -> bytes:
         """Bytes to write to the network, pushes as much request body as flow control allows."""
         call = self._call
-        if call is not None and call.pending:
+        if call is not None and call.pending and not call.ended and not self.dead:
             while call.pending:
                 window = min(self._h2.local_flow_control_window(call.stream_id), self._h2.max_outbound_frame_size)
                 if window <= 0:
@@ -100,15 +119,47 @@ class GrpcProtocol:
         return self._h2.data_to_send()
 
     def feed(self, data: bytes) -> None:
-        """Process bytes read from the network."""
+        """Process bytes read from the network.
+
+        Frames are handed to h2 one at a time so that events of a frame that
+        completes the current call survive an error raised by a later frame
+        in the same read (h2 rejects anything after GOAWAY).
+        """
         if not data:
             self.dead = True
             raise TransportError("connection closed by peer")
+        self._inbuf += data
+        while len(self._inbuf) >= _FRAME_HEADER and not self.dead:
+            length = int.from_bytes(self._inbuf[:3], "big") + _FRAME_HEADER
+            if len(self._inbuf) < length:
+                break
+            frame = bytes(self._inbuf[:length])
+            del self._inbuf[:length]
+            self._feed_frame(frame)
+
+    def feed_idle(self, data: bytes) -> None:
+        """``feed`` for bytes that arrived while no call was active, never raises."""
+        try:
+            self.feed(data)
+        except TransportError:
+            pass
+
+    def _feed_frame(self, frame: bytes) -> None:
         call = self._call
-        for event in self._h2.receive_data(data):
+        try:
+            events = self._h2.receive_data(frame)
+        except h2.exceptions.H2Error as exc:
+            was_terminated = self.dead or self._h2.state_machine.state is _CLOSED
+            self.dead = True
+            if was_terminated:
+                self._terminated(call, exc)
+                return
+            raise
+        for event in events:
             if isinstance(event, h2.events.ConnectionTerminated):
                 self.dead = True
-                raise TransportError(f"connection terminated by peer (error {event.error_code})")
+                self._terminated(call, None, event.error_code)
+                return
             if call is None or getattr(event, "stream_id", None) != call.stream_id:
                 continue
             if isinstance(event, h2.events.DataReceived):
@@ -121,19 +172,49 @@ class GrpcProtocol:
             elif isinstance(event, h2.events.StreamEnded):
                 call.ended = True
             elif isinstance(event, h2.events.StreamReset):
+                if call.ended:
+                    continue  # RST_STREAM(NO_ERROR) after END_STREAM is allowed
                 self.dead = True
                 raise TransportError(f"stream reset by peer (error {event.error_code})")
+
+    def _terminated(self, call: _Call | None, cause: BaseException | None, error_code: Any = None) -> None:
+        """The peer closed the connection. Only an unfinished call is an error."""
+        if call is not None and call.ended:
+            return
+        suffix = f" (error {error_code})" if error_code is not None else ""
+        raise TransportError(f"connection terminated by peer{suffix}") from cause
 
     @property
     def done(self) -> bool:
         return self._call is not None and self._call.ended
 
-    def result(self) -> bytes:
-        """The response message of the finished call, raises ``RpcError`` for non OK status."""
+    def result(self) -> tuple[bytes, Metadata, Metadata]:
+        """Response message, headers and trailers of the finished call.
+
+        Raises ``RpcError`` for a non OK status.
+        """
         call = self._call
         assert call is not None and call.ended
         self._call = None
         return call.finish()
+
+    def cancel(self) -> bytes:
+        """Give up on the current call, returns the RST_STREAM bytes to flush.
+
+        The connection stays usable. Returns ``b""`` and marks the connection
+        dead if the stream cannot be reset.
+        """
+        call = self._call
+        self._call = None
+        if call is None:
+            return b""
+        try:
+            if not call.ended:
+                self._h2.reset_stream(call.stream_id, h2.errors.ErrorCodes.CANCEL)
+            return self._h2.data_to_send()
+        except Exception:
+            self.dead = True
+            return b""
 
     def abort(self) -> None:
         """Forget the current call and mark the connection unusable."""
@@ -189,10 +270,22 @@ class _Call:
         self.data = bytearray()
         self.ended = False
 
-    def finish(self) -> bytes:
+    def finish(self) -> tuple[bytes, Metadata, Metadata]:
         http_status = self.headers.get(":status")
+        if not self.trailers and "grpc-status" in self.headers:
+            # trailers-only response, gRPC reports its metadata as trailers
+            headers: Metadata = {}
+            trailers = _metadata(self.headers)
+        else:
+            headers = _metadata(self.headers)
+            trailers = _metadata(self.trailers)
         if http_status != "200":
-            raise RpcError(_status_from_http(http_status), f"unexpected HTTP status {http_status}")
+            raise RpcError(
+                _status_from_http(http_status),
+                f"unexpected HTTP status {http_status}",
+                headers=headers,
+                trailers=trailers,
+            )
 
         # trailers-only responses carry grpc-status in the headers
         meta = self.trailers or self.headers
@@ -201,12 +294,31 @@ class _Call:
             raise TransportError("response is missing grpc-status")
         code = _status_code(raw_status)
         message = unquote(meta.get("grpc-message", ""))
-        details_b64 = meta.get("grpc-status-details-bin", "")
-        details = base64.b64decode(details_b64 + "=" * (-len(details_b64) % 4)) if details_b64 else b""
+        details = _b64decode(meta.get("grpc-status-details-bin", ""))
         if code is not Status.OK:
-            raise RpcError(code, message, details)
+            raise RpcError(code, message, details, headers=headers, trailers=trailers)
 
-        return _unframe(bytes(self.data), self.headers.get("grpc-encoding", "identity"))
+        payload = _unframe(bytes(self.data), self.headers.get("grpc-encoding", "identity"))
+        return payload, headers, trailers
+
+
+def _b64decode(text: str) -> bytes:
+    if not text:
+        return b""
+    try:
+        return base64.b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        return b""
+
+
+def _metadata(raw: dict[str, str]) -> Metadata:
+    """User visible metadata: no pseudo headers, no status trailers, ``-bin`` decoded."""
+    out: Metadata = {}
+    for key, value in raw.items():
+        if key.startswith(":") or key in _STATUS_KEYS:
+            continue
+        out[key] = _b64decode(value) if key.endswith("-bin") else value
+    return out
 
 
 def _unframe(data: bytes, encoding: str) -> bytes:
@@ -249,7 +361,7 @@ def _status_from_http(http_status: str | None) -> Status:
 
 
 def _format_timeout(seconds: float) -> str:
-    # grpc-timeout carries at most 8 digits, pick the coarsest unit that fits
+    # grpc-timeout carries at most 8 digits, pick the finest unit that fits
     for unit, factor in (("n", 1e9), ("u", 1e6), ("m", 1e3), ("S", 1), ("M", 1 / 60), ("H", 1 / 3600)):
         value = int(seconds * factor)
         if value < 100_000_000:

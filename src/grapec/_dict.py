@@ -167,7 +167,9 @@ def from_dict(cls: type, data: dict[str, Any]) -> Any:
         field, spec = entry
         where = f"{cls.__qualname__}.{field.name}"
         if raw is None:
-            kwargs[field.name] = None
+            # proto3 JSON: null means "unset", the zero value for implicit
+            # presence fields, None for optional fields and oneofs
+            kwargs[field.name] = None if field.optional else zero_value(field.type)
             continue
         kwargs[field.name] = _load(spec, raw, where=where)
 
@@ -217,6 +219,8 @@ def _load(spec: TypeSpec, raw: Any, *, where: str) -> Any:
                     raise ValueError(f"{where}: unknown enum name {raw!r}") from None
             return _enum_value(cls, _load_int(raw, where))
         case StructType(cls):
+            if isinstance(raw, cls):
+                return raw
             return from_dict(cls, raw)
         case TimestampType():
             if isinstance(raw, datetime):
@@ -271,7 +275,7 @@ def _load_int(raw: Any, where: str) -> int:
     raise TypeError(f"{where}: expected an int, got {raw!r}")
 
 
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2})(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})$")
 
 
 def _parse_timestamp(raw: str, where: str) -> datetime:
@@ -279,13 +283,13 @@ def _parse_timestamp(raw: str, where: str) -> datetime:
     if not m:
         raise ValueError(f"{where}: invalid RFC 3339 timestamp {raw!r}")
     base, frac, tz = m.groups()
-    value = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")
+    value = datetime.strptime(base[:10] + "T" + base[11:], "%Y-%m-%dT%H:%M:%S")
     if frac:
         value = value.replace(microsecond=int((frac[1:] + "000000")[:6]))
-    if tz == "Z":
+    if tz in ("Z", "z"):
         return value.replace(tzinfo=timezone.utc)
     sign = 1 if tz[0] == "+" else -1
-    offset = timedelta(hours=int(tz[1:3]), minutes=int(tz[4:6])) * sign
+    offset = timedelta(hours=int(tz[1:3]), minutes=int(tz[-2:])) * sign
     return (value - offset).replace(tzinfo=timezone.utc)
 
 

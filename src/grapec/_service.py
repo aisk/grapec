@@ -34,6 +34,24 @@ METHOD_ATTR = "__grapec_method__"
 NAME_ATTR = "__grapec_name__"
 _SESSION_ATTR = "__grapec_session__"
 _OWNED_ATTR = "__grapec_owns_session__"
+_BOUND_ATTR = "__grapec_bound__"
+
+
+class CallDetails:
+    """Response metadata of one call, pass an instance as ``details=`` to receive it.
+
+    ``headers`` and ``trailers`` are filled after the call returned or raised
+    ``RpcError``. Binary values (``-bin`` keys) are ``bytes``.
+    """
+
+    __slots__ = ("headers", "trailers")
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str | bytes] = {}
+        self.trailers: dict[str, str | bytes] = {}
+
+    def __repr__(self) -> str:
+        return f"CallDetails(headers={self.headers!r}, trailers={self.trailers!r})"
 
 
 class CallOptions(TypedDict, total=False):
@@ -42,6 +60,7 @@ class CallOptions(TypedDict, total=False):
     timeout: float | None
     metadata: dict[str, str | bytes] | None
     compression: str | None
+    details: CallDetails | None
 
 
 _OPTION_KEYS = frozenset(CallOptions.__annotations__)
@@ -98,7 +117,13 @@ class _RemoteMethod:
     def __get__(self, instance: Any, owner: type | None = None) -> Any:
         if instance is None:
             return self
-        return _bind(self.spec, _session_of(instance))
+        session = _session_of(instance)
+        bound = instance.__dict__.setdefault(_BOUND_ATTR, {})
+        try:
+            return bound[self.spec.python_name]
+        except KeyError:
+            call = bound[self.spec.python_name] = _bind(self.spec, session)
+            return call
 
     def __repr__(self) -> str:
         return f"<remote method {self.spec.path}>"
@@ -113,7 +138,8 @@ def _bind(spec: MethodSpec, session: Any) -> Callable[..., Any]:
 
     call.__name__ = spec.python_name
     call.__qualname__ = f"{spec.service.cls.__qualname__}.{spec.python_name}"
-    call.__doc__ = spec.service.cls.__dict__[spec.python_name].__doc__
+    call.__doc__ = getattr(spec.service.cls, spec.python_name).__doc__
+    setattr(call, METHOD_ATTR, spec)
     return call
 
 
@@ -144,6 +170,11 @@ class _ClientBase:
             if attr.startswith("_") or not inspect.isfunction(value):
                 continue
             setattr(cls, attr, _RemoteMethod(_build_method(spec, attr, value), value))
+        if name is not None:
+            # an explicit wire name applies to inherited methods as well
+            for attr, value in remote_methods(cls).items():
+                if attr not in vars(cls):
+                    setattr(cls, attr, _RemoteMethod(dataclasses.replace(value.spec, service=spec), value.__wrapped__))
 
     def __init__(self, target: Any, **options: Any) -> None:
         from ._session import AsyncSession, Session
@@ -213,6 +244,16 @@ def _build_method(svc: ServiceSpec, attr: str, func: Callable[..., Any]) -> Meth
         raise SchemaError(f"{where}: return annotation must be a struct")
     wire_name = getattr(func, NAME_ATTR, attr)
     return MethodSpec(svc, wire_name, request, response, attr)
+
+
+def remote_methods(cls: type) -> dict[str, _RemoteMethod]:
+    """All remote methods of a client class, inherited ones first, in declaration order."""
+    out: dict[str, _RemoteMethod] = {}
+    for klass in reversed(cls.__mro__):
+        for attr, value in vars(klass).items():
+            if isinstance(value, _RemoteMethod):
+                out[attr] = value  # overrides keep the position of the inherited method
+    return out
 
 
 def method_of(func: Any) -> MethodSpec:

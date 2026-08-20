@@ -91,3 +91,30 @@ def test_oneof_json_uses_member_names():
     assert Everything.from_dict({"choiceInt": "5"}).choice == 5
     assert Everything.from_dict({"choice": 5}).choice == 5
     assert Everything.from_dict({"choice": "s"}).choice == "s"
+
+
+def test_null_means_unset():
+    v = Everything.from_json('{"i": null, "ints": null, "counts": null, "optI": null, "inner": null, "choiceStr": null}')
+    assert v.i == 0 and v.ints == [] and v.counts == {} and v.opt_i is None
+    assert v.inner == Inner(label="", weight=0)
+    assert v.choice is None
+    assert Everything.from_bytes(bytes(v)) == v
+    assert Inner.from_dict({"label": None, "weight": 1}) == Inner(label="", weight=1)
+
+
+def test_from_dict_accepts_struct_instances():
+    inner = Inner(label="a", weight=1)
+    v = Everything.from_dict({"inner": inner, "inners": [inner], "by_id": {1: inner}, "choice": inner})
+    assert v.inner == inner and v.inners == [inner] and v.by_id == {1: inner} and v.choice == inner
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["2021-03-04T05:06:07Z", "2021-03-04T05:06:07z", "2021-03-04T05:06:07+00:00", "2021-03-04T07:06:07+0200", "2021-03-04T00:06:07-05:00"],
+)
+def test_timestamp_formats(text):
+    @grapec.struct(package="t")
+    class S:
+        ts: datetime
+
+    assert S.from_json(json.dumps({"ts": text})).ts == datetime(2021, 3, 4, 5, 6, 7, tzinfo=timezone.utc)

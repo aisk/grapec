@@ -1,4 +1,7 @@
+import socket
+import ssl
 import threading
+import time
 from typing import Unpack
 
 import pytest
@@ -292,3 +295,149 @@ def test_service_names():
     assert method_of(S.raw).path == "/a.b.Svc/raw"
     assert method_of(S.renamed).path == "/a.b.Svc/Renamed"
     assert S._helper.__name__ == "_helper"
+
+
+def _idle_connection(client):
+    return grapec.session_of(client)._pool._idle[0][0]
+
+
+def test_timeout_keeps_connection(greeter):
+    greeter.say_hello(HelloRequest(name="warm"))
+    conn = _idle_connection(greeter)
+    with pytest.raises(grapec.RpcError) as info:
+        greeter.slow(HelloRequest(name="x"), timeout=0.2)
+    assert info.value.code is grapec.Status.DEADLINE_EXCEEDED
+    assert _idle_connection(greeter) is conn
+    assert greeter.say_hello(HelloRequest(name="after")).message == "hello after 0"
+    assert _idle_connection(greeter) is conn
+
+
+def test_socket_timeout_is_set_per_call(greeter):
+    greeter.say_hello(HelloRequest(name="a"), timeout=5)
+    conn = _idle_connection(greeter)
+    conn._sock.settimeout(0)  # whatever a previous call left behind must not matter
+    blob = bytes(range(256)) * 4096
+    assert greeter.say_hello(HelloRequest(name="big", blob=blob)).message == f"hello big {len(blob)}"
+    assert conn._sock.gettimeout() is None
+
+
+def test_stale_connection_after_goaway_is_dropped(serve):
+    url = f"grpc://127.0.0.1:{serve([('grpc.max_connection_age_ms', 200), ('grpc.max_connection_age_grace_ms', 100)])}"
+    g = Greeter(url)
+    assert g.say_hello(HelloRequest(name="a")).message == "hello a 0"
+    first = _idle_connection(g)
+    time.sleep(0.8)
+    assert g.say_hello(HelloRequest(name="b")).message == "hello b 0"
+    assert _idle_connection(g) is not first
+    assert not first.healthy
+    grapec.close(g)
+
+
+def test_max_idle_time_evicts_old_connections(url):
+    now = [100.0]
+    g = Greeter(url, max_idle_time=30)
+    grapec.session_of(g)._pool._clock = lambda: now[0]
+    g.say_hello(HelloRequest(name="a"))
+    old = _idle_connection(g)
+    now[0] += 10
+    g.say_hello(HelloRequest(name="b"))
+    assert _idle_connection(g) is old
+    now[0] += 31
+    g.say_hello(HelloRequest(name="c"))
+    assert _idle_connection(g) is not old
+    assert not old.healthy
+    assert len(grapec.session_of(g)._pool) == 1
+    grapec.close(g)
+
+
+def test_call_details_and_error_metadata(greeter):
+    details = grapec.CallDetails()
+    greeter.say_hello(HelloRequest(name="d"), details=details)
+    assert details.headers["x-initial"] == "yes"
+    assert details.trailers["x-echo"] == "d"
+    assert details.trailers["x-raw-bin"] == b"\x01\x02"
+    assert ":status" not in details.headers and "grpc-status" not in details.trailers
+
+    details = grapec.CallDetails()
+    with pytest.raises(grapec.RpcError) as info:
+        greeter.fail(HelloRequest(name="e"), details=details)
+    assert info.value.trailers["x-reason"] == "test"
+    assert details.trailers == info.value.trailers
+    assert "grpc-message" not in info.value.trailers
+
+    with grapec.Session(grapec.session_of(greeter).url) as session:
+        details = grapec.CallDetails()
+        session.call(Greeter.say_hello, HelloRequest(name="s"), details=details)
+        assert details.trailers["x-echo"] == "s"
+
+
+def test_bound_methods_are_cached_and_usable_with_session_call(greeter):
+    assert greeter.say_hello is greeter.say_hello
+    session = grapec.session_of(greeter)
+    assert session.call(greeter.say_hello, HelloRequest(name="b")).message == "hello b 0"
+
+
+def test_subclass_with_name_rebinds_inherited_methods():
+    from grapec._service import method_of
+
+    class Renamed(Greeter, name="Greeter2"):
+        def extra(self, request: HelloRequest) -> HelloReply: ...
+
+    assert method_of(Renamed.say_hello).path == "/test.rpc.Greeter2/SayHello"
+    assert method_of(Renamed.extra).path == "/test.rpc.Greeter2/extra"
+    assert method_of(Greeter.say_hello).path == "/test.rpc.Greeter/SayHello"
+
+
+def test_ipv6_authority():
+    from grapec._grpc import authority
+
+    assert authority("::1", 50051) == "[::1]:50051"
+    assert authority("localhost", 50051) == "localhost:50051"
+
+
+def test_ssl_option_validation(url):
+    with pytest.raises(ValueError):
+        grapec.Session(url, ssl=ssl.create_default_context())
+    with pytest.raises(TypeError):
+        grapec.Session("grpcs://localhost:1", ssl="yes")  # type: ignore[arg-type]
+
+
+def test_tls(tls_rpc_server):
+    port, cert = tls_rpc_server
+    ctx = ssl.create_default_context(cafile=str(cert))
+    g = Greeter(f"grpcs://localhost:{port}", ssl=ctx)
+    assert g.say_hello(HelloRequest(name="tls")).message == "hello tls 0"
+    assert g.say_hello(HelloRequest(name="again")).message == "hello again 0"
+    grapec.close(g)
+    # the default context does not trust the test certificate
+    g = Greeter(f"grpcs://localhost:{port}", connect_timeout=2)
+    with pytest.raises(grapec.TransportError):
+        g.say_hello(HelloRequest(name="tls"))
+
+
+def test_keyboard_interrupt_does_not_poison_the_pool(url, monkeypatch):
+    class Interrupting:
+        def __init__(self, sock):
+            self._sock = sock
+            self.calls = 0
+
+        def recv(self, *args):
+            self.calls += 1
+            if self.calls == 1:
+                raise BlockingIOError  # the idle poll before the call sees nothing
+            raise KeyboardInterrupt
+
+        def __getattr__(self, name):
+            return getattr(self._sock, name)
+
+    g = Greeter(url)
+    g.say_hello(HelloRequest(name="warm"))
+    conn = _idle_connection(g)
+    real = conn._sock
+    monkeypatch.setattr(conn, "_sock", Interrupting(real))
+    with pytest.raises(KeyboardInterrupt):
+        g.say_hello(HelloRequest(name="x"))
+    assert not conn.healthy
+    assert len(grapec.session_of(g)._pool) == 0
+    assert g.say_hello(HelloRequest(name="y")).message == "hello y 0"
+    grapec.close(g)

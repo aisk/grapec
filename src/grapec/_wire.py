@@ -48,7 +48,8 @@ def decode_varint(buf: bytes, pos: int) -> tuple[int, int]:
         pos += 1
         result |= (byte & 0x7F) << shift
         if not byte & 0x80:
-            return result, pos
+            # the tenth byte may carry bits above 64, protobuf discards them
+            return result & _MASK64, pos
         shift += 7
         if shift > 63:
             raise WireError("varint too long")
