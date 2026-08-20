@@ -7,8 +7,8 @@ import ssl
 import time
 from typing import Any
 
-from ._errors import RpcError, Status, TransportError
-from ._grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
+from .errors import RpcError, Status, TransportError
+from .grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
 
 _RECV_SIZE = 65536
 

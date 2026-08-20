@@ -35,7 +35,6 @@ def oracle(tmp_path_factory):
 
 def _servicer():
     import grpc
-
     import rpc_pb2
     import rpc_pb2_grpc
 
@@ -63,7 +62,6 @@ def _servicer():
 
 def _start_server(options=None, credentials=None, host="127.0.0.1"):
     import grpc
-
     import rpc_pb2_grpc
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), options=list(options or []))

@@ -3,9 +3,9 @@ import ssl
 
 import pytest
 import pytest_asyncio
+from test_client import HelloReply, HelloRequest
 
 import grapec
-from test_client import HelloReply, HelloRequest
 
 pytestmark = pytest.mark.asyncio
 

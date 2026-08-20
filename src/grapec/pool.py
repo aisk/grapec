@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Callable, Generic, TypeVar
 
-from ._errors import TransportError
+from .errors import TransportError
 
 C = TypeVar("C")
 

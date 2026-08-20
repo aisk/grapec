@@ -7,7 +7,7 @@ import hyperframe.frame
 import pytest
 
 import grapec
-from grapec._grpc import GrpcProtocol
+from grapec.grpc import GrpcProtocol
 
 
 def _pair():

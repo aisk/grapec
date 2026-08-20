@@ -22,7 +22,7 @@ import h2.errors
 import h2.events
 import h2.exceptions
 
-from ._errors import RpcError, Status, TransportError
+from .errors import RpcError, Status, TransportError
 
 USER_AGENT = "grapec"
 

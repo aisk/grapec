@@ -16,8 +16,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ._codec import EncodeError
-from ._schema import (
+from .codec import EncodeError
+from .schema import (
     DurationType,
     EnumType,
     FieldSpec,

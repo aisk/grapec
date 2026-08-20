@@ -2,18 +2,17 @@ import enum
 from pathlib import Path
 
 import pytest
-
-import grapec
 from test_client import Greeter, HelloReply, HelloRequest
 from test_struct import Everything, Inner, full_value
+
+import grapec
 
 
 def test_export_matches_oracle(oracle, tmp_path):
     """The exported proto, compiled by protoc, must parse our bytes identically."""
     import grpc_tools
-    from grpc_tools import protoc
-
     from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+    from grpc_tools import protoc
 
     text = grapec.export_proto(Everything)
     (tmp_path / "exported.proto").write_text(text)

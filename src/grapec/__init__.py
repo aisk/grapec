@@ -20,14 +20,23 @@ Example::
     reply = greeter.say_hello(HelloRequest(name="x"))
 """
 
-from ._codec import EncodeError
-from ._errors import GrapecError, RpcError, Status, TransportError
-from ._proto import export_proto
-from ._schema import Id, SchemaError, is_struct
-from ._service import AsyncClient, CallDetails, CallOptions, Client, aclose, close, name, session_of
-from ._session import AsyncSession, Session
-from ._struct import struct
-from ._wire import WireError
+from .codec import EncodeError
+from .errors import GrapecError, RpcError, Status, TransportError
+from .proto import export_proto
+from .schema import Id, SchemaError, is_struct
+from .service import (
+    AsyncClient,
+    CallDetails,
+    CallOptions,
+    Client,
+    aclose,
+    close,
+    name,
+    session_of,
+)
+from .session import AsyncSession, Session
+from .struct import struct
+from .wire import WireError
 
 __all__ = [
     "struct",

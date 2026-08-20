@@ -89,7 +89,7 @@ def test_compressed_response(greeter):
 
 @pytest.mark.parametrize("algo", ["gzip", "deflate"])
 def test_compressed_request(url, algo, monkeypatch):
-    from grapec import _grpc
+    from grapec import grpc as _grpc
 
     calls = []
     original = _grpc._ENCODERS[algo]
@@ -234,7 +234,7 @@ def test_uninitialised_subclass():
 
 
 def test_inherits_package():
-    from grapec._service import method_of
+    from grapec.service import method_of
 
     class Child(Greeter):
         def extra(self, request: HelloRequest) -> HelloReply: ...
@@ -281,7 +281,7 @@ def test_service_signature_validation():
 
 
 def test_service_names():
-    from grapec._service import method_of
+    from grapec.service import method_of
 
     class S(grapec.Client, package="a.b", name="Svc"):
         def raw(self, request: HelloRequest) -> HelloReply: ...
@@ -378,7 +378,7 @@ def test_bound_methods_are_cached_and_usable_with_session_call(greeter):
 
 
 def test_subclass_with_name_rebinds_inherited_methods():
-    from grapec._service import method_of
+    from grapec.service import method_of
 
     class Renamed(Greeter, name="Greeter2"):
         def extra(self, request: HelloRequest) -> HelloReply: ...
@@ -389,7 +389,7 @@ def test_subclass_with_name_rebinds_inherited_methods():
 
 
 def test_ipv6_authority():
-    from grapec._grpc import authority
+    from grapec.grpc import authority
 
     assert authority("::1", 50051) == "[::1]:50051"
     assert authority("localhost", 50051) == "localhost:50051"

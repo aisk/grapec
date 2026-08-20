@@ -6,8 +6,9 @@ import dataclasses
 import re
 from typing import Any, Callable, TypeVar, dataclass_transform, get_type_hints
 
-from . import _codec, _dict
-from ._schema import PACKAGE_ATTR, SchemaError, split_annotated, split_union
+from . import codec as _codec
+from . import dict as _dict
+from .schema import PACKAGE_ATTR, SchemaError, split_annotated, split_union
 
 T = TypeVar("T")
 

@@ -182,7 +182,7 @@ def test_keyword_only_and_dataclass_behaviour():
 
 
 def test_auto_numbering_continues_after_explicit_id():
-    from grapec._schema import schema_of
+    from grapec.schema import schema_of
 
     @grapec.struct(package="t")
     class S:
@@ -311,7 +311,7 @@ def test_oneof_is_optional_by_default():
 
 
 def test_oneof_explicit_ids():
-    from grapec._schema import schema_of
+    from grapec.schema import schema_of
 
     @grapec.struct(package="t")
     class S:
@@ -357,7 +357,7 @@ def test_optional_list_items_have_a_clear_error():
 
 
 def test_by_number_is_cached():
-    from grapec._schema import schema_of
+    from grapec.schema import schema_of
 
     schema = schema_of(Inner)
     assert schema.by_number is schema.by_number

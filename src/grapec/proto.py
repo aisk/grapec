@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 from typing import Any
 
-from ._schema import (
+from .schema import (
     DurationType,
     EnumType,
     ListType,
@@ -24,7 +24,7 @@ from ._schema import (
     is_struct,
     schema_of,
 )
-from ._service import SERVICE_ATTR, MethodSpec, ServiceSpec, remote_methods
+from .service import SERVICE_ATTR, MethodSpec, ServiceSpec, remote_methods
 
 _SCALAR_NAMES = {"int": "int64", "float": "double", "str": "string", "bytes": "bytes", "bool": "bool"}
 

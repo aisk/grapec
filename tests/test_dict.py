@@ -3,9 +3,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from google.protobuf import json_format
+from test_struct import Color, Everything, Inner, full_value
 
 import grapec
-from test_struct import Color, Everything, Inner, full_value
 
 
 def test_to_dict_keeps_python_values():

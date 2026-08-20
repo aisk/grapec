@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import ssl
 
-from ._errors import RpcError, Status, TransportError
-from ._grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
+from .errors import RpcError, Status, TransportError
+from .grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
 
 _RECV_SIZE = 65536
 _CLOSE_TIMEOUT = 1

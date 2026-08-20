@@ -23,8 +23,8 @@ import dataclasses
 import inspect
 from typing import Any, Callable, TypedDict, TypeVar, get_type_hints
 
-from ._schema import SchemaError, is_struct
-from ._struct import _PACKAGE_RE
+from .schema import SchemaError, is_struct
+from .struct import _PACKAGE_RE
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -177,7 +177,7 @@ class _ClientBase:
                     setattr(cls, attr, _RemoteMethod(dataclasses.replace(value.spec, service=spec), value.__wrapped__))
 
     def __init__(self, target: Any, **options: Any) -> None:
-        from ._session import AsyncSession, Session
+        from .session import AsyncSession, Session
 
         wanted = AsyncSession if type(self).__grapec_async__ else Session
         if isinstance(target, str):

@@ -1,6 +1,6 @@
 [project]
 name = "grapec"
-version = "0.7.0"
+version = "0.3.0"
 description = "Declare plain Python classes and serialize them for cross language RPC"
 readme = "README.md"
 authors = [

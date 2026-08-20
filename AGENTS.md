@@ -4,18 +4,18 @@
 grapec turns plain annotated Python classes into serializable structs that speak the protobuf wire format, and calls remote services described by annotated service classes. Python is the source of truth, there are no `.proto` files at runtime. The only runtime dependency is `h2`.
 
 - `src/grapec/__init__.py`: public API (`struct`, `Id`, `is_struct`, error types).
-- `src/grapec/_struct.py`: the `@struct(package=...)` decorator, turns the class into a keyword only dataclass and injects implicit defaults.
-- `src/grapec/_schema.py`: resolves type hints into an internal, wire agnostic schema (`StructSchema`, `FieldSpec`, `TypeSpec`).
-- `src/grapec/_codec.py`: encodes and decodes instances using the schema.
-- `src/grapec/_wire.py`: low level protobuf wire primitives (varint, tags, length delimited).
-- `src/grapec/_dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
-- `src/grapec/_proto.py`: `export_proto`, renders structs and services as proto3 source.
-- `src/grapec/_service.py`: `Client` / `AsyncClient` base classes (users subclass them with `package=`), `@name(...)`, `CallOptions`, `CallDetails` (response metadata out parameter), and the module helpers `close` / `aclose` / `session_of`. Declared methods are replaced by `_RemoteMethod` descriptors carrying a `MethodSpec`, bound methods are cached per instance and carry the spec too.
-- `src/grapec/_session.py`: protocol neutral `Session` and `AsyncSession` (connection owners, low level `call`), the `Connection` / `AsyncConnection` protocols transports implement (`healthy`, `poll`, `unary`, `close`), and the URL scheme to transport mapping. `poll` is called before an idle connection is reused and must never block.
-- `src/grapec/_pool.py`: idle connection bookkeeping shared by both clients, including the `max_idle_time` eviction.
-- `src/grapec/_grpc.py`: sans-IO gRPC over HTTP/2 state machine on top of `h2`, the only place that knows gRPC framing and headers. Never touches a socket. Feeds h2 one frame at a time so a response that completes right before a GOAWAY survives, ignores RST_STREAM after END_STREAM, and cancels a stream with RST_STREAM(CANCEL) on deadline expiry instead of dropping the connection.
-- `src/grapec/_sync.py` and `src/grapec/_async.py`: thin blocking socket and asyncio shells around `GrpcProtocol`.
-- `src/grapec/_errors.py`: `Status`, `RpcError`, `TransportError`.
+- `src/grapec/struct.py`: the `@struct(package=...)` decorator, turns the class into a keyword only dataclass and injects implicit defaults.
+- `src/grapec/schema.py`: resolves type hints into an internal, wire agnostic schema (`StructSchema`, `FieldSpec`, `TypeSpec`).
+- `src/grapec/codec.py`: encodes and decodes instances using the schema.
+- `src/grapec/wire.py`: low level protobuf wire primitives (varint, tags, length delimited).
+- `src/grapec/dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
+- `src/grapec/proto.py`: `export_proto`, renders structs and services as proto3 source.
+- `src/grapec/service.py`: `Client` / `AsyncClient` base classes (users subclass them with `package=`), `@name(...)`, `CallOptions`, `CallDetails` (response metadata out parameter), and the module helpers `close` / `aclose` / `session_of`. Declared methods are replaced by `_RemoteMethod` descriptors carrying a `MethodSpec`, bound methods are cached per instance and carry the spec too.
+- `src/grapec/session.py`: protocol neutral `Session` and `AsyncSession` (connection owners, low level `call`), the `Connection` / `AsyncConnection` protocols transports implement (`healthy`, `poll`, `unary`, `close`), and the URL scheme to transport mapping. `poll` is called before an idle connection is reused and must never block.
+- `src/grapec/pool.py`: idle connection bookkeeping shared by both clients, including the `max_idle_time` eviction.
+- `src/grapec/grpc.py`: sans-IO gRPC over HTTP/2 state machine on top of `h2`, the only place that knows gRPC framing and headers. Never touches a socket. Feeds h2 one frame at a time so a response that completes right before a GOAWAY survives, ignores RST_STREAM after END_STREAM, and cancels a stream with RST_STREAM(CANCEL) on deadline expiry instead of dropping the connection.
+- `src/grapec/sync.py` and `src/grapec/aio.py`: thin blocking socket and asyncio shells around `GrpcProtocol`.
+- `src/grapec/errors.py`: `Status`, `RpcError`, `TransportError`.
 - `examples/hello/`: demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
 - `tests/`: pytest suite. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server. `tests/test_protocol.py` drives `GrpcProtocol` against an h2 server connection without sockets, use it for frame level edge cases.
 

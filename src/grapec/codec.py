@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import _wire as w
-from ._schema import (
+from . import wire as w
+from .schema import (
     DurationType,
     EnumType,
     FieldSpec,
@@ -18,11 +18,10 @@ from ._schema import (
     StructType,
     TimestampType,
     TypeSpec,
+    _enum_value,
     schema_of,
     zero_value,
-    _enum_value,
 )
-
 
 
 def _is_packed(spec: TypeSpec) -> bool:

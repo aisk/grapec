@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 from urllib.parse import SplitResult, urlsplit
 
-from ._errors import RpcError
-from ._pool import Pool
-from ._service import CallDetails, MethodSpec, method_of
+from .errors import RpcError
+from .pool import Pool
+from .service import CallDetails, MethodSpec, method_of
 
 Req = TypeVar("Req")
 Resp = TypeVar("Resp")
@@ -84,14 +84,14 @@ def _host_port(url: SplitResult, default_port: int) -> tuple[str, int]:
 
 
 def _grpc_sync(opts: TransportOptions, tls: bool) -> ConnectionFactory:
-    from ._sync import GrpcConnection
+    from .sync import GrpcConnection
 
     host, port = _host_port(opts.url, 443 if tls else 80)
     return lambda: GrpcConnection(host, port, tls=tls, connect_timeout=opts.connect_timeout, ssl_context=opts.ssl)
 
 
 def _grpc_async(opts: TransportOptions, tls: bool) -> AsyncConnectionFactory:
-    from ._async import AsyncGrpcConnection
+    from .aio import AsyncGrpcConnection
 
     host, port = _host_port(opts.url, 443 if tls else 80)
     return lambda: AsyncGrpcConnection(host, port, tls=tls, ssl_context=opts.ssl).connect(opts.connect_timeout)
