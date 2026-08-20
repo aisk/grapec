@@ -8,10 +8,12 @@ other protocols can be added next to it.
 from __future__ import annotations
 
 import base64
+import gzip
 import socket
 import ssl
 import struct as _struct
 import time
+import zlib
 from typing import Any
 from urllib.parse import unquote
 
@@ -24,6 +26,17 @@ from ._errors import RpcError, Status, TransportError
 
 USER_AGENT = "grapec"
 _RECV_SIZE = 65536
+
+_ENCODERS = {
+    "gzip": gzip.compress,
+    "deflate": zlib.compress,
+}
+_DECODERS = {
+    "identity": lambda data: data,
+    "gzip": gzip.decompress,
+    "deflate": zlib.decompress,
+}
+ACCEPT_ENCODING = "identity,gzip,deflate"
 
 Metadata = dict[str, str | bytes]
 
@@ -74,10 +87,18 @@ class GrpcConnection:
         except OSError:
             pass
 
-    def unary(self, path: str, payload: bytes, *, timeout: float | None, metadata: Metadata | None) -> bytes:
+    def unary(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> bytes:
         """Send one request message, return the single response message."""
         try:
-            return self._unary(path, payload, timeout, metadata)
+            return self._unary(path, payload, timeout, metadata, compression)
         except RpcError:
             raise
         except TransportError:
@@ -92,13 +113,30 @@ class GrpcConnection:
 
     # -- implementation -------------------------------------------------------
 
-    def _unary(self, path: str, payload: bytes, timeout: float | None, metadata: Metadata | None) -> bytes:
+    def _unary(
+        self,
+        path: str,
+        payload: bytes,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> bytes:
         deadline = time.monotonic() + timeout if timeout is not None else None
         self._sock.settimeout(timeout)
 
+        if compression is not None and compression != "identity":
+            try:
+                payload = _ENCODERS[compression](payload)
+            except KeyError:
+                raise ValueError(f"unsupported compression {compression!r}") from None
+            compressed = 1
+        else:
+            compression = None
+            compressed = 0
+
         stream_id = self._h2.get_next_available_stream_id()
-        self._h2.send_headers(stream_id, self._request_headers(path, timeout, metadata))
-        self._send_body(stream_id, _struct.pack(">BI", 0, len(payload)) + payload, deadline)
+        self._h2.send_headers(stream_id, self._request_headers(path, timeout, metadata, compression))
+        self._send_body(stream_id, _struct.pack(">BI", compressed, len(payload)) + payload, deadline)
 
         call = _Call()
         while not call.ended:
@@ -106,7 +144,9 @@ class GrpcConnection:
 
         return call.finish()
 
-    def _request_headers(self, path: str, timeout: float | None, metadata: Metadata | None) -> list[tuple[str, str]]:
+    def _request_headers(
+        self, path: str, timeout: float | None, metadata: Metadata | None, compression: str | None
+    ) -> list[tuple[str, str]]:
         headers = [
             (":method", "POST"),
             (":scheme", self._scheme),
@@ -115,8 +155,10 @@ class GrpcConnection:
             ("te", "trailers"),
             ("content-type", "application/grpc"),
             ("user-agent", USER_AGENT),
-            ("grpc-accept-encoding", "identity"),
+            ("grpc-accept-encoding", ACCEPT_ENCODING),
         ]
+        if compression is not None:
+            headers.append(("grpc-encoding", compression))
         if timeout is not None:
             headers.append(("grpc-timeout", _format_timeout(timeout)))
         for key, value in (metadata or {}).items():
@@ -202,18 +244,25 @@ class _Call:
         if code is not Status.OK:
             raise RpcError(code, message, details)
 
-        return _unframe(bytes(self.data))
+        return _unframe(bytes(self.data), self.headers.get("grpc-encoding", "identity"))
 
 
-def _unframe(data: bytes) -> bytes:
+def _unframe(data: bytes, encoding: str) -> bytes:
     if len(data) < 5:
         raise TransportError("response body is truncated")
     compressed, length = _struct.unpack(">BI", data[:5])
-    if compressed:
-        raise TransportError("compressed responses are not supported")
     if len(data) != 5 + length:
         raise TransportError("response does not contain exactly one message")
-    return data[5:]
+    message = data[5:]
+    if not compressed:
+        return message
+    decoder = _DECODERS.get(encoding)
+    if decoder is None:
+        raise TransportError(f"unsupported response compression {encoding!r}")
+    try:
+        return decoder(message)
+    except (OSError, zlib.error, EOFError) as exc:
+        raise TransportError(f"cannot decompress response: {exc}") from exc
 
 
 def _status_code(raw: str) -> Status:

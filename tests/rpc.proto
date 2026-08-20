@@ -15,4 +15,5 @@ service Greeter {
   rpc SayHello (HelloRequest) returns (HelloReply) {}
   rpc Fail (HelloRequest) returns (HelloReply) {}
   rpc Slow (HelloRequest) returns (HelloReply) {}
+  rpc Compressed (HelloRequest) returns (HelloReply) {}
 }

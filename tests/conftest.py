@@ -53,6 +53,10 @@ def rpc_server(oracle):
             time.sleep(1)
             return rpc_pb2.HelloReply(message="late")
 
+        def Compressed(self, request, context):
+            context.set_compression(grpc.Compression.Gzip)
+            return rpc_pb2.HelloReply(message="x" * 10000 + request.name)
+
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     rpc_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
     port = server.add_insecure_port("127.0.0.1:0")

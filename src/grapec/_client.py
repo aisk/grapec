@@ -23,7 +23,15 @@ class Connection(Protocol):
 
     def close(self) -> None: ...
 
-    def unary(self, path: str, payload: bytes, *, timeout: float | None, metadata: Metadata | None) -> bytes: ...
+    def unary(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> bytes: ...
 
 
 ConnectionFactory = Callable[[], Connection]
@@ -52,6 +60,9 @@ class Client:
     or ``grpcs://host:443``. Connections are pooled, at most ``max_idle`` idle
     connections are kept. A connection that fails below the application level
     is dropped, the error is raised to the caller and never retried.
+
+    ``compression`` (``"gzip"`` or ``"deflate"``) compresses outgoing
+    requests. Compressed responses are always accepted.
     """
 
     def __init__(
@@ -61,6 +72,7 @@ class Client:
         max_idle: int = 4,
         timeout: float | None = None,
         connect_timeout: float | None = 10,
+        compression: str | None = None,
     ) -> None:
         parsed = urlsplit(url)
         try:
@@ -69,6 +81,7 @@ class Client:
             raise ValueError(f"unsupported scheme {parsed.scheme!r} in {url!r}") from None
         self.url = url
         self.timeout = timeout
+        self.compression = compression
         self._factory = make(parsed, connect_timeout)
         self._max_idle = max_idle
         self._idle: list[Connection] = []
@@ -82,6 +95,7 @@ class Client:
         *,
         timeout: float | None = None,
         metadata: Metadata | None = None,
+        compression: str | None = None,
     ) -> Resp:
         """Invoke ``method`` (for example ``Greeter.say_hello``) with ``request``."""
         spec = method_of(method)
@@ -89,11 +103,13 @@ class Client:
             raise TypeError(f"{spec.path} expects {spec.request.__qualname__}, got {type(request).__qualname__}")
         if timeout is None:
             timeout = self.timeout
+        if compression is None:
+            compression = self.compression
 
         payload = request.to_bytes()  # type: ignore[attr-defined]
         conn = self._acquire()
         try:
-            raw = conn.unary(spec.path, payload, timeout=timeout, metadata=metadata)
+            raw = conn.unary(spec.path, payload, timeout=timeout, metadata=metadata, compression=compression)
         finally:
             self._release(conn)
         return spec.response.from_bytes(raw)  # type: ignore[no-any-return]

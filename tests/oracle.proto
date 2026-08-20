@@ -35,4 +35,9 @@ message Everything {
   google.protobuf.Duration dur = 17;
   int64 renumbered = 20;
   repeated Color colors = 21;
+  oneof choice {
+    Inner choice_inner = 22;
+    string choice_str = 23;
+    int64 choice_int = 24;
+  }
 }

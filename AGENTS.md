@@ -8,6 +8,8 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/_schema.py`: resolves type hints into an internal, wire agnostic schema (`StructSchema`, `FieldSpec`, `TypeSpec`).
 - `src/grapec/_codec.py`: encodes and decodes instances using the schema.
 - `src/grapec/_wire.py`: low level protobuf wire primitives (varint, tags, length delimited).
+- `src/grapec/_dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
+- `src/grapec/_proto.py`: `export_proto`, renders structs and services as proto3 source.
 - `src/grapec/_service.py`: the `@service(package=...)` and `@name(...)` decorators, resolves method signatures into `MethodSpec`.
 - `src/grapec/_client.py`: protocol neutral `Client` with a small connection pool and the `Connection` protocol transports implement. Maps URL schemes to transports.
 - `src/grapec/_grpc.py`: gRPC over HTTP/2 transport on top of `h2`, the only place that knows gRPC framing and headers.

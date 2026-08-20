@@ -74,8 +74,53 @@ class MapType:
     value: TypeSpec
 
 
+@dataclasses.dataclass(frozen=True)
+class Member:
+    """One alternative of a oneof, it owns its own field number."""
+
+    number: int
+    type: ScalarType | EnumType | StructType | TimestampType | DurationType
+
+    def matches(self, value: Any) -> bool:
+        return python_type_of(self.type) is type(value)
+
+    def accepts(self, value: Any) -> bool:
+        return isinstance(value, python_type_of(self.type))
+
+    def json_name(self, field_name: str) -> str:
+        """Name of this member on the proto side, ``<field>_<type>``."""
+        return f"{field_name}_{self.suffix}"
+
+    @property
+    def suffix(self) -> str:
+        match self.type:
+            case ScalarType(kind):
+                return kind
+            case EnumType(cls) | StructType(cls):
+                return _snake(cls.__name__)
+            case TimestampType():
+                return "timestamp"
+            case DurationType():
+                return "duration"
+        raise AssertionError(self.type)
+
+
+@dataclasses.dataclass(frozen=True)
+class OneOfType:
+    members: tuple[Member, ...]
+
+    def pick(self, value: Any) -> Member | None:
+        for m in self.members:
+            if m.matches(value):
+                return m
+        for m in self.members:
+            if m.accepts(value):
+                return m
+        return None
+
+
 TypeSpec = Union[
-    ScalarType, EnumType, StructType, TimestampType, DurationType, ListType, MapType
+    ScalarType, EnumType, StructType, TimestampType, DurationType, ListType, MapType, OneOfType
 ]
 
 
@@ -85,6 +130,11 @@ class FieldSpec:
     number: int
     type: TypeSpec
     optional: bool
+
+    def numbers(self) -> tuple[int, ...]:
+        if isinstance(self.type, OneOfType):
+            return tuple(m.number for m in self.type.members)
+        return (self.number,)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,8 +147,15 @@ class StructSchema:
     def full_name(self) -> str:
         return f"{self.package}.{self.cls.__name__}"
 
-    def by_number(self) -> dict[int, FieldSpec]:
-        return {f.number: f for f in self.fields}
+    def by_number(self) -> dict[int, tuple[FieldSpec, Member | None]]:
+        out: dict[int, tuple[FieldSpec, Member | None]] = {}
+        for f in self.fields:
+            if isinstance(f.type, OneOfType):
+                for m in f.type.members:
+                    out[m.number] = (f, m)
+            else:
+                out[f.number] = (f, None)
+        return out
 
 
 SCHEMA_ATTR = "__grapec_schema__"
@@ -118,17 +175,39 @@ def is_struct(obj: Any) -> bool:
     return PACKAGE_ATTR in cls.__dict__
 
 
-def split_optional(tp: Any) -> tuple[Any, bool]:
-    """Return (inner, True) for ``T | None`` and (tp, False) otherwise."""
+def python_type_of(spec: TypeSpec) -> type:
+    match spec:
+        case ScalarType(kind):
+            return {"int": int, "float": float, "str": str, "bytes": bytes, "bool": bool}[kind]
+        case EnumType(cls) | StructType(cls):
+            return cls
+        case TimestampType():
+            return datetime
+        case DurationType():
+            return timedelta
+        case ListType():
+            return list
+        case MapType():
+            return dict
+    raise SchemaError(f"{spec} has no single Python type")
+
+
+def split_union(tp: Any) -> tuple[list[Any], bool]:
+    """Return the non None members of a union and whether None was present."""
     origin = get_origin(tp)
     if origin is Union or origin is types.UnionType:
-        args = [a for a in get_args(tp) if a is not type(None)]
-        if len(args) == len(get_args(tp)):
-            raise SchemaError(f"unions other than `T | None` are not supported: {tp}")
-        if len(args) != 1:
-            raise SchemaError(f"only `T | None` unions are supported: {tp}")
-        return args[0], True
-    return tp, False
+        args = list(get_args(tp))
+        members = [a for a in args if a is not type(None)]
+        return members, len(members) != len(args)
+    return [tp], False
+
+
+def split_optional(tp: Any) -> tuple[Any, bool]:
+    """Return (inner, True) for ``T | None`` and (tp, False) otherwise."""
+    members, optional = split_union(tp)
+    if len(members) != 1:
+        raise SchemaError(f"only `T | None` unions are supported here: {tp}")
+    return members[0], optional
 
 
 def split_annotated(tp: Any) -> tuple[Any, tuple[Any, ...]]:
@@ -163,6 +242,9 @@ def resolve_type(tp: Any, *, where: str) -> TypeSpec:
         if isinstance(value_spec, (ListType, MapType)):
             raise SchemaError(f"{where}: dict values cannot be list or dict")
         return MapType(key_spec, value_spec)
+
+    if origin is Union or origin is types.UnionType:
+        raise SchemaError(f"{where}: unions are only supported at the top level of a field")
 
     if origin is not None:
         raise SchemaError(f"{where}: unsupported type {tp!r}")
@@ -208,30 +290,53 @@ def build_schema(cls: type) -> StructSchema:
         hint = hints[name]
 
         inner, metadata = split_annotated(hint)
-        inner, optional = split_optional(inner)
-        if optional:
-            inner, more = split_annotated(inner)
-            metadata = metadata + more
+        members, optional = split_union(inner)
 
+        def take_number(metadata: tuple[Any, ...]) -> int:
+            nonlocal last
+            number = _explicit_id(metadata, where=where)
+            if number is None:
+                number = last + 1
+                while number in used or number in RESERVED_RANGE:
+                    number += 1
+            if number in used:
+                raise SchemaError(f"{where}: duplicate field number {number}")
+            if number > MAX_FIELD_NUMBER:
+                raise SchemaError(f"{where}: field number {number} out of range")
+            used.add(number)
+            last = number
+            return number
+
+        if len(members) > 1:
+            spec = _resolve_oneof(members, take_number, where=where)
+            fields.append(FieldSpec(name, spec.members[0].number, spec, optional))
+            continue
+
+        inner, more = split_annotated(members[0])
+        metadata = metadata + more
         spec = resolve_type(inner, where=where)
         if optional and isinstance(spec, (ListType, MapType)):
             raise SchemaError(f"{where}: list and dict fields cannot be optional")
-
-        number = _explicit_id(metadata, where=where)
-        if number is None:
-            number = last + 1
-            while number in used or number in RESERVED_RANGE:
-                number += 1
-        if number in used:
-            raise SchemaError(f"{where}: duplicate field number {number}")
-        if number > MAX_FIELD_NUMBER:
-            raise SchemaError(f"{where}: field number {number} out of range")
-        used.add(number)
-        last = number
-
-        fields.append(FieldSpec(name, number, spec, optional))
+        fields.append(FieldSpec(name, take_number(metadata), spec, optional))
 
     return StructSchema(cls, package, tuple(fields))
+
+
+def _resolve_oneof(members: list[Any], take_number: Any, where: str) -> OneOfType:
+    out: list[Member] = []
+    seen: list[type] = []
+    for member in members:
+        inner, metadata = split_annotated(member)
+        spec = resolve_type(inner, where=where)
+        if isinstance(spec, (ListType, MapType)):
+            raise SchemaError(f"{where}: union members cannot be list or dict")
+        py = python_type_of(spec)
+        for other in seen:
+            if issubclass(py, other) or issubclass(other, py):
+                raise SchemaError(f"{where}: union members {other.__name__} and {py.__name__} cannot be told apart")
+        seen.append(py)
+        out.append(Member(take_number(metadata), spec))
+    return OneOfType(tuple(out))
 
 
 def schema_of(cls: type) -> StructSchema:
@@ -269,6 +374,8 @@ def zero_value(spec: TypeSpec) -> Any:
             return []
         case MapType():
             return {}
+        case OneOfType():
+            return None
     raise AssertionError(spec)
 
 
@@ -278,3 +385,12 @@ def _enum_value(cls: type[enum.IntEnum], value: int) -> Any:
     except ValueError:
         # proto3 enums are open, keep unknown values as plain ints
         return value
+
+
+def _snake(name: str) -> str:
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i and (not name[i - 1].isupper() or (i + 1 < len(name) and name[i + 1].islower())):
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)

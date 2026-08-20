@@ -24,6 +24,7 @@ Example::
 from ._client import Client
 from ._codec import EncodeError
 from ._errors import GrapecError, RpcError, Status, TransportError
+from ._proto import export_proto
 from ._schema import Id, SchemaError, is_struct
 from ._service import name, service
 from ._struct import struct
@@ -35,6 +36,7 @@ __all__ = [
     "is_struct",
     "service",
     "name",
+    "export_proto",
     "Client",
     "Status",
     "GrapecError",

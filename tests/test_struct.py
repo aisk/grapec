@@ -41,6 +41,7 @@ class Everything:
     dur: timedelta
     renumbered: Annotated[int, Id(20)]
     colors: list[Color]
+    choice: Inner | str | int | None
 
 
 def full_value() -> Everything:
@@ -64,6 +65,7 @@ def full_value() -> Everything:
         dur=timedelta(seconds=-3, microseconds=-500),
         renumbered=99,
         colors=[Color.RED, Color.BLUE],
+        choice="pick me",
     )
 
 
@@ -96,6 +98,7 @@ def test_decodes_with_protobuf(oracle):
     assert msg.dur.seconds == -3 and msg.dur.nanos == -500000
     assert msg.renumbered == 99
     assert list(msg.colors) == [oracle.RED, oracle.BLUE]
+    assert msg.WhichOneof("choice") == "choice_str" and msg.choice_str == "pick me"
 
 
 def test_encodes_same_bytes_as_protobuf(oracle):
@@ -121,6 +124,7 @@ def test_decodes_protobuf_output(oracle):
     msg.ts.FromDatetime(datetime(2020, 5, 6, tzinfo=timezone.utc))
     msg.dur.FromTimedelta(timedelta(minutes=2))
     msg.colors.extend([oracle.BLUE, 77])
+    msg.choice_inner.label = "chosen"
 
     v = Everything.from_bytes(msg.SerializeToString())
     assert v.i == 1 and v.s == "x" and v.color is Color.RED
@@ -135,6 +139,7 @@ def test_decodes_protobuf_output(oracle):
     assert v.dur == timedelta(minutes=2)
     assert v.renumbered == 0
     assert v.colors == [Color.BLUE, 77]
+    assert v.choice == Inner(label="chosen", weight=0)
 
 
 def test_unpacked_repeated_is_accepted():
@@ -202,7 +207,7 @@ def test_forward_reference_and_recursion():
 
 @pytest.mark.parametrize(
     "annotation",
-    ["set[int]", "int | str", "list[int] | None", "list[list[int]]", "dict[float, int]", "object", "Plain"],
+    ["set[int]", "int | bool", "list[int] | None", "list[int | str]", "int | list[str]", "list[list[int]]", "dict[float, int]", "object", "Plain"],
 )
 def test_unsupported_annotations(annotation):
     class Plain:
@@ -276,3 +281,41 @@ def test_naive_datetime_uses_local_timezone():
     naive = datetime(2024, 1, 1, 12, 0, 0)
     out = S.from_bytes(bytes(S(ts=naive)))
     assert out.ts == naive.astimezone(timezone.utc)
+
+
+def test_oneof_members():
+    for value in (Inner(label="x", weight=1), "s", 5, None):
+        v = Everything.from_bytes(bytes(Everything.from_bytes(b"")))
+        v.choice = value
+        assert Everything.from_bytes(bytes(v)).choice == value
+
+
+def test_oneof_rejects_foreign_value():
+    v = Everything.from_bytes(b"")
+    v.choice = 1.5  # type: ignore[assignment]
+    with pytest.raises(grapec.EncodeError):
+        bytes(v)
+
+
+def test_oneof_required_rejects_none():
+    @grapec.struct(package="t")
+    class S:
+        kind: Inner | str
+
+    with pytest.raises(TypeError):
+        S()  # type: ignore[call-arg]
+    with pytest.raises(grapec.EncodeError):
+        bytes(S(kind=None))  # type: ignore[arg-type]
+    assert S.from_bytes(b"").kind is None
+
+
+def test_oneof_explicit_ids():
+    from grapec._schema import schema_of
+
+    @grapec.struct(package="t")
+    class S:
+        kind: Annotated[Inner, Id(7)] | Annotated[str, Id(9)] | None
+        after: int
+
+    numbers = [f.numbers() for f in schema_of(S).fields]
+    assert numbers == [(7, 9), (10,)]

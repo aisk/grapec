@@ -12,6 +12,7 @@ from ._schema import (
     FieldSpec,
     ListType,
     MapType,
+    OneOfType,
     ScalarType,
     StructSchema,
     StructType,
@@ -84,6 +85,13 @@ def _encode_field(out: bytearray, field: FieldSpec, value: Any, *, where: str) -
         if field.optional:
             return
         raise EncodeError(f"{where}: None is not allowed, declare the field as `T | None`")
+
+    if isinstance(spec, OneOfType):
+        member = spec.pick(value)
+        if member is None:
+            raise EncodeError(f"{where}: {type(value).__qualname__} is not one of the union members")
+        _encode_single(out, member.number, member.type, value, where)
+        return
 
     if not field.optional and isinstance(spec, ScalarType) and value == zero_value(spec):
         # proto3 implicit presence, default values are not written
@@ -194,9 +202,13 @@ def _decode_struct(schema: StructSchema, buf: bytes) -> Any:
     pos = 0
     while pos < len(buf):
         number, wire_type, pos = w.decode_tag(buf, pos)
-        field = by_number.get(number)
-        if field is None:
+        entry = by_number.get(number)
+        if entry is None:
             pos = w.skip_field(buf, pos, wire_type)
+            continue
+        field, member = entry
+        if member is not None:
+            values[field.name], pos = _decode_single(member.type, buf, pos, wire_type)
             continue
         pos = _decode_field(values, field, buf, pos, wire_type)
 

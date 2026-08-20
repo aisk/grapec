@@ -11,6 +11,8 @@ req = HelloRequest(
     trace_id="abc123",
 )
 
+print(req.to_json())
+
 with grapec.Client("grpc://localhost:50051") as client:
     reply = client.call(Greeter.say_hello, req, timeout=5)
     print(reply)

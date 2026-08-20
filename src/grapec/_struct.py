@@ -6,8 +6,8 @@ import dataclasses
 import re
 from typing import Any, Callable, TypeVar, dataclass_transform, get_type_hints
 
-from . import _codec
-from ._schema import PACKAGE_ATTR, SchemaError, split_annotated, split_optional
+from . import _codec, _dict
+from ._schema import PACKAGE_ATTR, SchemaError, split_annotated, split_union
 
 T = TypeVar("T")
 
@@ -37,6 +37,10 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
         cls.to_bytes = _to_bytes  # type: ignore[attr-defined]
         cls.__bytes__ = _to_bytes  # type: ignore[attr-defined]
         cls.from_bytes = classmethod(_from_bytes)  # type: ignore[attr-defined]
+        cls.to_dict = _dict.to_dict  # type: ignore[attr-defined]
+        cls.from_dict = classmethod(_dict.from_dict)  # type: ignore[attr-defined]
+        cls.to_json = _dict.to_json  # type: ignore[attr-defined]
+        cls.from_json = classmethod(_dict.from_json)  # type: ignore[attr-defined]
         return cls
 
     return wrap
@@ -77,13 +81,12 @@ def _inject_defaults(cls: type) -> None:
 
 def _classify(hint: Any) -> str | None:
     inner, _ = split_annotated(hint)
-    try:
-        inner, optional = split_optional(inner)
-    except SchemaError:
-        return None
+    members, optional = split_union(inner)
     if optional:
         return "optional"
-    inner, _ = split_annotated(inner)
+    if len(members) != 1:
+        return None
+    inner, _ = split_annotated(members[0])
     origin = getattr(inner, "__origin__", None)
     if origin is list:
         return "list"

@@ -31,6 +31,9 @@ class Greeter:
     @grapec.name("Missing")
     def missing(self, request: HelloRequest) -> HelloReply: ...
 
+    @grapec.name("Compressed")
+    def compressed(self, request: HelloRequest) -> HelloReply: ...
+
 
 @pytest.fixture
 def client(rpc_server):
@@ -59,6 +62,33 @@ def test_metadata(client):
     )
     assert reply.metadata["x-trace"] == "abc"
     assert reply.metadata["x-raw-bin"] == "00ff"
+
+
+def test_compressed_response(client):
+    reply = client.call(Greeter.compressed, HelloRequest(name="z"))
+    assert reply.message == "x" * 10000 + "z"
+
+
+@pytest.mark.parametrize("algo", ["gzip", "deflate"])
+def test_compressed_request(rpc_server, algo, monkeypatch):
+    from grapec import _grpc
+
+    calls = []
+    original = _grpc._ENCODERS[algo]
+    monkeypatch.setitem(_grpc._ENCODERS, algo, lambda data: calls.append(len(data)) or original(data))
+
+    blob = b"\x00" * 100_000
+    with grapec.Client(f"grpc://127.0.0.1:{rpc_server}", compression=algo) as c:
+        reply = c.call(Greeter.say_hello, HelloRequest(name="c", blob=blob))
+        assert reply.message == f"hello c {len(blob)}"
+        assert calls == [len(bytes(HelloRequest(name="c", blob=blob)))]
+        c.call(Greeter.say_hello, HelloRequest(name="c"), compression="identity")
+        assert len(calls) == 1
+
+
+def test_unknown_compression(client):
+    with pytest.raises(ValueError):
+        client.call(Greeter.say_hello, HelloRequest(name="c"), compression="brotli")
 
 
 def test_reserved_metadata_rejected(client):
