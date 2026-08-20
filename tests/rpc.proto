@@ -1,0 +1,18 @@
+syntax = "proto3";
+package test.rpc;
+
+message HelloRequest {
+  string name = 1;
+  bytes blob = 2;
+}
+
+message HelloReply {
+  string message = 1;
+  map<string, string> metadata = 2;
+}
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+  rpc Fail (HelloRequest) returns (HelloReply) {}
+  rpc Slow (HelloRequest) returns (HelloReply) {}
+}

@@ -2,14 +2,17 @@
 
 Pronunciation (IPA): `/ɡreɪ.peɪk/` (similar to "gray-pay-k").
 
-Declare plain Python classes, get cross language serialization for free.
+Declare plain Python classes, call remote services with them.
 
-You write a class that looks like a dataclass. grapec turns it into one and
-adds `to_bytes` / `from_bytes` that speak the protobuf wire format, so the
-bytes can be exchanged with any standard protobuf or gRPC implementation.
-No `.proto` files, no code generation, no runtime dependencies.
+You write classes that look like dataclasses and a service class with typed
+method signatures. grapec turns the classes into dataclasses that speak the
+protobuf wire format and lets you call the methods on any standard gRPC
+server. No `.proto` files, no code generation, no C extensions. The only
+dependency is the pure Python `h2` library.
 
-Current scope is struct serialization. RPC transports are the next step.
+Current scope: struct serialization and unary calls from a sync client.
+Streaming, async and other protocols (thrift) come later, the public API is
+kept protocol neutral for that.
 
 ## Install
 
@@ -48,8 +51,27 @@ class HelloRequest:
     sent_at: datetime | None
 
 
+@grapec.struct(package="example.hello.v1")
+class HelloReply:
+    message: str
+
+
+@grapec.service(package="example.hello.v1")
+class Greeter:
+    @grapec.name("SayHello")
+    def say_hello(self, request: HelloRequest) -> HelloReply: ...
+
+
 req = HelloRequest(name="grapec", tags=[Tag(key="lang", value="python")])
 
+with grapec.Client("grpc://localhost:50051") as client:
+    reply = client.call(Greeter.say_hello, req, timeout=5)
+    print(reply.message)
+```
+
+Serialization is available on its own as well:
+
+```python
 data = bytes(req)                       # or req.to_bytes()
 same = HelloRequest.from_bytes(data)
 assert same == req
@@ -72,9 +94,32 @@ message HelloRequest {
   repeated Tag tags = 3;
   optional google.protobuf.Timestamp sent_at = 4;
 }
+
+message HelloReply {
+  string message = 1;
+}
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+}
 ```
 
-## Rules
+## Services and the client
+
+- `@grapec.service(package=...)` marks a class as a service description. Each public method takes exactly one struct argument and returns a struct. Bodies are never executed, `...` is enough.
+- Names are used as is on the wire. Use `@grapec.name("SayHello")` on a method or `@grapec.service(package=..., name="Greeter")` to pick a different wire name.
+- `grapec.Client(url, max_idle=4, timeout=None, connect_timeout=10)` picks the protocol from the URL scheme: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS.
+- `client.call(Service.method, request, timeout=..., metadata=...)` returns a response struct. The return type is inferred from the method signature, so type checkers and IDEs see the right type.
+- `metadata` is a dict of header values. Binary values must be `bytes` under a key ending in `-bin`.
+- Connections are pooled. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. A connection that fails at the transport level is dropped, the error is raised and never retried.
+- `client.close()` or `with grapec.Client(...) as client:` closes idle connections. `__del__` does the same as a fallback.
+
+Errors:
+
+- `grapec.RpcError` when the server answers with a non OK status. It carries `code` (`grapec.Status`, an `IntEnum` aligned with gRPC status codes), `message` and `details`. Deadline expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`.
+- `grapec.TransportError` when the connection itself fails (refused, reset, protocol error).
+
+## Struct rules
 
 - `@grapec.struct(package=...)` makes the class a keyword only dataclass. `package` is required and becomes the namespace on the wire side.
 - Fields are numbered 1, 2, 3, ... in declaration order. Use `Annotated[T, grapec.Id(n)]` to pin a number. Fields after a pinned one continue counting from it.
@@ -103,9 +148,12 @@ message HelloRequest {
 
 ## Example
 
+`examples/hello/server.py` is a plain grpcio server compiled from `hello.proto`, standing in for a service written in any language. `client.py` talks to it with grapec only.
+
 ```
 cd examples/hello
-python main.py
+python server.py &
+python client.py
 ```
 
 ## Development
@@ -115,4 +163,4 @@ uv sync
 uv run pytest
 ```
 
-Tests compile `tests/oracle.proto` with `grpcio-tools` and compare grapec's bytes against the official protobuf implementation.
+Tests compile `tests/oracle.proto` and `tests/rpc.proto` with `grpcio-tools`. Serialization is compared byte for byte against the official protobuf implementation and the client is exercised against a real grpcio server.

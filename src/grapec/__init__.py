@@ -1,4 +1,4 @@
-"""grapec: declare plain Python classes, serialize them for cross language RPC.
+"""grapec: declare plain Python classes, call remote services with them.
 
 Example::
 
@@ -7,15 +7,40 @@ Example::
     @grapec.struct(package="example.hello.v1")
     class HelloRequest:
         name: str
-        tags: list[str]
 
-    data = bytes(HelloRequest(name="x"))
-    req = HelloRequest.from_bytes(data)
+    @grapec.struct(package="example.hello.v1")
+    class HelloReply:
+        message: str
+
+    @grapec.service(package="example.hello.v1")
+    class Greeter:
+        @grapec.name("SayHello")
+        def say_hello(self, request: HelloRequest) -> HelloReply: ...
+
+    client = grapec.Client("grpc://localhost:50051")
+    reply = client.call(Greeter.say_hello, HelloRequest(name="x"))
 """
 
+from ._client import Client
 from ._codec import EncodeError
+from ._errors import GrapecError, RpcError, Status, TransportError
 from ._schema import Id, SchemaError, is_struct
+from ._service import name, service
 from ._struct import struct
 from ._wire import WireError
 
-__all__ = ["struct", "Id", "is_struct", "SchemaError", "EncodeError", "WireError"]
+__all__ = [
+    "struct",
+    "Id",
+    "is_struct",
+    "service",
+    "name",
+    "Client",
+    "Status",
+    "GrapecError",
+    "RpcError",
+    "TransportError",
+    "SchemaError",
+    "EncodeError",
+    "WireError",
+]

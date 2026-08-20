@@ -1,0 +1,34 @@
+// The "other side" of the demo. This is what a standard gRPC server in any
+// language would use, grapec never reads this file.
+syntax = "proto3";
+package example.hello.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum Priority {
+  UNSPECIFIED = 0;
+  LOW = 1;
+  HIGH = 2;
+}
+
+message Tag {
+  string key = 1;
+  string value = 2;
+}
+
+message HelloRequest {
+  string name = 1;
+  Priority priority = 2;
+  repeated Tag tags = 3;
+  optional google.protobuf.Timestamp sent_at = 4;
+  string trace_id = 5;
+}
+
+message HelloReply {
+  string message = 1;
+  map<string, string> extra = 2;
+}
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+}

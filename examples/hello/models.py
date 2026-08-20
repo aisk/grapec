@@ -32,3 +32,9 @@ class HelloRequest:
 class HelloReply:
     message: str
     extra: dict[str, str]
+
+
+@grapec.service(package="example.hello.v1")
+class Greeter:
+    @grapec.name("SayHello")
+    def say_hello(self, request: HelloRequest) -> HelloReply: ...
