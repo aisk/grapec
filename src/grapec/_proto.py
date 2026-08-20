@@ -82,7 +82,7 @@ def export_proto(*roots: type) -> str:
             visit_struct(root)
             pkg = schema_of(root).package
         else:
-            raise SchemaError(f"{root!r} is neither a struct nor a service")
+            raise SchemaError(f"{root!r} is neither a struct nor a client class")
         if package is None:
             package = pkg
         elif package != pkg:

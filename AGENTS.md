@@ -10,8 +10,8 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/_wire.py`: low level protobuf wire primitives (varint, tags, length delimited).
 - `src/grapec/_dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
 - `src/grapec/_proto.py`: `export_proto`, renders structs and services as proto3 source.
-- `src/grapec/_service.py`: the `@service(package=...)` and `@name(...)` decorators, resolves method signatures into `MethodSpec`.
-- `src/grapec/_client.py`: protocol neutral `Client` and `AsyncClient`, the `Connection` / `AsyncConnection` protocols transports implement, and the URL scheme to transport mapping.
+- `src/grapec/_service.py`: `Client` / `AsyncClient` base classes (users subclass them with `package=`), `@name(...)`, `CallOptions`, and the module helpers `close` / `aclose` / `session_of`. Declared methods are replaced by `_RemoteMethod` descriptors carrying a `MethodSpec`.
+- `src/grapec/_session.py`: protocol neutral `Session` and `AsyncSession` (connection owners, low level `call`), the `Connection` / `AsyncConnection` protocols transports implement, and the URL scheme to transport mapping.
 - `src/grapec/_pool.py`: idle connection bookkeeping shared by both clients.
 - `src/grapec/_grpc.py`: sans-IO gRPC over HTTP/2 state machine on top of `h2`, the only place that knows gRPC framing and headers. Never touches a socket.
 - `src/grapec/_sync.py` and `src/grapec/_async.py`: thin blocking socket and asyncio shells around `GrpcProtocol`.
@@ -32,11 +32,13 @@ Keep the schema layer free of wire format details, the clients free of gRPC deta
 - Python 3.12+ features are welcome when they make the API nicer.
 - Naming must stay transport neutral. Do not put `grpc` or `proto` into public names.
 - Keep user facing class bodies pure Python. Extra metadata goes into `Annotated[...]`, never into field defaults.
+- `Client` / `AsyncClient` must not grow public (non dunder) attributes or methods, user RPC method names live in that namespace. Put helpers at module level.
+- Call options (`timeout`, `metadata`, `compression`, see `CallOptions`) are keyword arguments of every remote method. gRPC methods take exactly one positional struct, so they cannot clash. Decided for future multi argument protocols (thrift): allow several parameters, but reject parameters named like a call option at class definition time with a hint to rename, since Python parameter names never affect the wire.
 
 ## Testing Guidelines
 - Add tests under `tests/`, name files `test_*.py`, cover normal and failure cases.
 - Wire format changes must be checked against the protobuf oracle, extend `tests/oracle.proto` when adding types.
-- Transport behaviour is tested against a real grpcio server (`rpc_server` fixture). Cover both `Client` and `AsyncClient`, async tests use `pytest-asyncio` in strict mode.
+- Transport behaviour is tested against a real grpcio server (`rpc_server` fixture). Cover both `Client` and `AsyncClient` subclasses, async tests use `pytest-asyncio` in strict mode.
 - Run `uv run pytest` before opening a PR.
 
 ## Commit & Pull Request Guidelines

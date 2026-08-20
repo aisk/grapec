@@ -56,17 +56,14 @@ class HelloReply:
     message: str
 
 
-@grapec.service(package="example.hello.v1")
-class Greeter:
+class Greeter(grapec.Client, package="example.hello.v1"):
     @grapec.name("SayHello")
     def say_hello(self, request: HelloRequest) -> HelloReply: ...
 
 
-req = HelloRequest(name="grapec", tags=[Tag(key="lang", value="python")])
-
-with grapec.Client("grpc://localhost:50051") as client:
-    reply = client.call(Greeter.say_hello, req, timeout=5)
-    print(reply.message)
+greeter = Greeter("grpc://localhost:50051", timeout=5)
+reply = greeter.say_hello(HelloRequest(name="grapec", tags=[Tag(key="lang", value="python")]))
+print(reply.message)
 ```
 
 Serialization and other views are available on their own as well:
@@ -111,28 +108,36 @@ service Greeter {
 }
 ```
 
-## Services and the client
+## Services and clients
 
-- `@grapec.service(package=...)` marks a class as a service description. Each public method takes exactly one struct argument and returns a struct. Bodies are never executed, `...` is enough.
-- Names are used as is on the wire. Use `@grapec.name("SayHello")` on a method or `@grapec.service(package=..., name="Greeter")` to pick a different wire name.
-- `grapec.Client(url, max_idle=4, timeout=None, connect_timeout=10)` picks the protocol from the URL scheme: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS.
-- `client.call(Service.method, request, timeout=..., metadata=...)` returns a response struct. The return type is inferred from the method signature, so type checkers and IDEs see the right type.
+- Declare a service by subclassing `grapec.Client` with a `package=` class argument. Each public method takes one struct and returns a struct. Bodies are never executed, `...` is enough. The base class owns `__init__` and has no public attributes of its own, so method names cannot clash with it.
+- Names are used as is on the wire. `@grapec.name("SayHello")` on a method or `name="Greeter"` next to `package=` pick a different wire name.
+- `Greeter(url, max_idle=4, timeout=None, connect_timeout=10, compression=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS.
+- Every method accepts `timeout=`, `metadata=` and `compression=` keyword arguments at runtime. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
 - `metadata` is a dict of header values. Binary values must be `bytes` under a key ending in `-bin`.
-- Connections are pooled. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. A connection that fails at the transport level is dropped, the error is raised and never retried.
-- `client.close()` or `with grapec.Client(...) as client:` closes idle connections. `__del__` does the same as a fallback.
-- Compressed responses (`gzip`, `deflate`) are always accepted. Pass `compression="gzip"` to the client or to a single `call` to compress requests.
+- Connections are pooled per client. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. A connection that fails at the transport level is dropped, the error is raised and never retried.
+- To share one pool between several clients, create a `grapec.Session(url, ...)` and pass it instead of a URL: `Greeter(session)`, `Orders(session)`.
+- `grapec.close(greeter)` closes the session a client created from a URL. Shared sessions are closed with `session.close()`. Garbage collection closes owned sessions as a fallback.
+- Compressed responses (`gzip`, `deflate`) are always accepted. Pass `compression="gzip"` to the client or to a single call to compress requests.
+- `session.call(Greeter.say_hello, request, ...)` is the low level entry point and works with methods of both sync and async declared clients.
 
 ### asyncio
 
-`grapec.AsyncClient` takes the same options and follows the same pooling rules:
+Subclass `grapec.AsyncClient` and declare the methods with `async def`:
 
 ```python
-async with grapec.AsyncClient("grpc://localhost:50051") as client:
-    reply = await client.call(Greeter.say_hello, req, timeout=5)
-    replies = await asyncio.gather(*(client.call(Greeter.say_hello, r) for r in requests))
+class AsyncGreeter(grapec.AsyncClient, package="example.hello.v1", name="Greeter"):
+    @grapec.name("SayHello")
+    async def say_hello(self, request: HelloRequest) -> HelloReply: ...
+
+
+greeter = AsyncGreeter("grpc://localhost:50051")
+reply = await greeter.say_hello(req, timeout=5)
+replies = await asyncio.gather(*(greeter.say_hello(r) for r in requests))
+await grapec.aclose(greeter)
 ```
 
-Use `await client.aclose()` when not using `async with`. Concurrent calls each get their own connection from the pool.
+Same options and pooling rules. Concurrent calls each get their own connection from the pool. `grapec.AsyncSession` is the shareable counterpart of `Session`.
 
 Errors:
 
@@ -156,7 +161,7 @@ Errors:
 
 ## Exporting a .proto
 
-`grapec.export_proto(Greeter, OtherStruct, ...)` renders proto3 source for the given structs and services and everything they reference. All roots must share one package, structs from other packages are referenced by full name with an `import "<package/path>.proto"`. The output is compiled with `protoc` in the test suite and checked to parse grapec's bytes identically.
+`grapec.export_proto(Greeter, OtherStruct, ...)` renders proto3 source for the given structs and client classes and everything they reference. All roots must share one package, structs from other packages are referenced by full name with an `import "<package/path>.proto"`. The output is compiled with `protoc` in the test suite and checked to parse grapec's bytes identically.
 
 ## Type mapping
 

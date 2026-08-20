@@ -12,21 +12,20 @@ Example::
     class HelloReply:
         message: str
 
-    @grapec.service(package="example.hello.v1")
-    class Greeter:
+    class Greeter(grapec.Client, package="example.hello.v1"):
         @grapec.name("SayHello")
         def say_hello(self, request: HelloRequest) -> HelloReply: ...
 
-    client = grapec.Client("grpc://localhost:50051")
-    reply = client.call(Greeter.say_hello, HelloRequest(name="x"))
+    greeter = Greeter("grpc://localhost:50051")
+    reply = greeter.say_hello(HelloRequest(name="x"))
 """
 
-from ._client import AsyncClient, Client
 from ._codec import EncodeError
 from ._errors import GrapecError, RpcError, Status, TransportError
 from ._proto import export_proto
 from ._schema import Id, SchemaError, is_struct
-from ._service import name, service
+from ._service import AsyncClient, CallOptions, Client, aclose, close, name, session_of
+from ._session import AsyncSession, Session
 from ._struct import struct
 from ._wire import WireError
 
@@ -34,11 +33,16 @@ __all__ = [
     "struct",
     "Id",
     "is_struct",
-    "service",
-    "name",
-    "export_proto",
     "Client",
     "AsyncClient",
+    "name",
+    "CallOptions",
+    "close",
+    "aclose",
+    "session_of",
+    "Session",
+    "AsyncSession",
+    "export_proto",
     "Status",
     "GrapecError",
     "RpcError",

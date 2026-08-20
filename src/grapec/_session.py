@@ -1,4 +1,8 @@
-"""The protocol neutral ``Client`` and ``AsyncClient``."""
+"""The protocol neutral ``Session`` and ``AsyncSession``, connection owners.
+
+Users normally go through ``grapec.Client`` subclasses, which create or
+share a session. ``Session.call`` is the low level entry point.
+"""
 
 from __future__ import annotations
 
@@ -88,7 +92,7 @@ _ASYNC_SCHEMES: dict[str, Callable[[SplitResult, float | None], AsyncConnectionF
 }
 
 
-class _BaseClient:
+class _BaseSession:
     """Options and request preparation shared by both clients."""
 
     def __init__(
@@ -127,8 +131,8 @@ class _BaseClient:
         )
 
 
-class Client(_BaseClient):
-    """Call methods of ``@grapec.service`` classes over the network.
+class Session(_BaseSession):
+    """Owns pooled connections to one server.
 
     ``url`` selects the protocol by scheme, for example ``grpc://host:50051``
     or ``grpcs://host:443``. Connections are pooled, at most ``max_idle`` idle
@@ -160,7 +164,10 @@ class Client(_BaseClient):
         metadata: Metadata | None = None,
         compression: str | None = None,
     ) -> Resp:
-        """Invoke ``method`` (for example ``Greeter.say_hello``) with ``request``."""
+        """Invoke ``method`` (for example ``Greeter.say_hello``) with ``request``.
+
+        Works with methods of both ``Client`` and ``AsyncClient`` subclasses.
+        """
         spec, payload, timeout, compression = self._prepare(method, request, timeout, compression)
         conn = self._acquire()
         try:
@@ -173,7 +180,7 @@ class Client(_BaseClient):
         for conn in self._pool.drain():
             conn.close()
 
-    def __enter__(self) -> "Client":
+    def __enter__(self) -> "Session":
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -197,12 +204,8 @@ class Client(_BaseClient):
             conn.close()
 
 
-class AsyncClient(_BaseClient):
-    """asyncio twin of :class:`Client`, same options and pooling rules.
-
-    ``await client.call(...)``, ``await client.aclose()`` or
-    ``async with grapec.AsyncClient(...) as client:``.
-    """
+class AsyncSession(_BaseSession):
+    """asyncio twin of :class:`Session`, same options and pooling rules."""
 
     def __init__(
         self,
@@ -242,7 +245,7 @@ class AsyncClient(_BaseClient):
         for conn in self._pool.drain():
             conn.close()
 
-    async def __aenter__(self) -> "AsyncClient":
+    async def __aenter__(self) -> "AsyncSession":
         return self
 
     async def __aexit__(self, *exc: object) -> None:

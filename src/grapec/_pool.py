@@ -29,7 +29,7 @@ class Pool(Generic[C]):
         """Pop an idle connection, or None if a new one must be created."""
         with self._lock:
             if self.closed:
-                raise TransportError("client is closed")
+                raise TransportError("session is closed")
             return self._idle.pop() if self._idle else None
 
     def give_back(self, conn: C) -> bool:

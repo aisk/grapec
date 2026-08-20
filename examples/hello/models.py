@@ -34,7 +34,11 @@ class HelloReply:
     extra: dict[str, str]
 
 
-@grapec.service(package="example.hello.v1")
-class Greeter:
+class Greeter(grapec.Client, package="example.hello.v1"):
     @grapec.name("SayHello")
     def say_hello(self, request: HelloRequest) -> HelloReply: ...
+
+
+class AsyncGreeter(grapec.AsyncClient, package="example.hello.v1", name="Greeter"):
+    @grapec.name("SayHello")
+    async def say_hello(self, request: HelloRequest) -> HelloReply: ...
