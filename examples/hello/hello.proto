@@ -1,8 +1,10 @@
 // The "other side" of the demo. This is what a standard gRPC server in any
-// language would use, grapec never reads this file.
+// language would use, grapec never reads this file. `python export.py` renders
+// the same definition from models.py.
 syntax = "proto3";
 package example.hello.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 enum Priority {
@@ -22,6 +24,12 @@ message HelloRequest {
   repeated Tag tags = 3;
   optional google.protobuf.Timestamp sent_at = 4;
   string trace_id = 5;
+  oneof payload {
+    Tag payload_tag = 6;
+    string payload_str = 7;
+  }
+  google.protobuf.Duration ttl = 8;
+  bytes nonce = 9;
 }
 
 message HelloReply {
@@ -29,6 +37,16 @@ message HelloReply {
   map<string, string> extra = 2;
 }
 
+message CountRequest {}
+
+message CountReply {
+  int64 greetings = 1;
+}
+
 service Greeter {
   rpc SayHello (HelloRequest) returns (HelloReply) {}
+}
+
+service Stats {
+  rpc Count (CountRequest) returns (CountReply) {}
 }

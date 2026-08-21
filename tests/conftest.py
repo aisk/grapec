@@ -177,6 +177,9 @@ def thrift_server():
         def undeclared(self, key):
             raise rpc.NotFound(key=key)
 
+        def undeclared_void(self, key):
+            raise rpc.NotFound(key=key)
+
         def echo_opt(self, n):
             return -1 if n is None else n
 

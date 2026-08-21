@@ -19,7 +19,15 @@ class Handler:
             raise store.NotFound(key=key) from None
 
     def put(self, item):
+        if item.key == "locked":
+            raise store.Locked(key=item.key)
         items[item.key] = item
+
+    def remove(self, key):
+        try:
+            return items.pop(key).count
+        except KeyError:
+            raise store.NotFound(key=key) from None
 
     def total(self):
         return sum(item.count for item in items.values())

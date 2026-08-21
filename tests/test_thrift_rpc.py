@@ -42,6 +42,8 @@ class Store(grapec.Client, package="rpc"):
 
     def undeclared(self, key: str) -> Item: ...
 
+    def undeclared_void(self, key: str) -> None: ...
+
     def nope(self, key: str) -> Item: ...
 
     def echo_opt(self, n: Annotated[int, I32] | None) -> Annotated[int, I32]: ...
@@ -104,7 +106,11 @@ def test_handler_failures_do_not_poison_the_client(store):
     # a declared thrift exception the client did not declare in @raises is unknown to us
     with pytest.raises(grapec.RpcError) as info:
         store.undeclared("k")
-    assert info.value.code is grapec.Status.UNKNOWN and "MISSING_RESULT" in info.value.message
+    assert info.value.code is grapec.Status.UNKNOWN and "not declared with @raises" in info.value.message
+    # a void method cannot fall back on a missing result, the unknown field is the only sign
+    with pytest.raises(grapec.RpcError) as info:
+        store.undeclared_void("k")
+    assert info.value.code is grapec.Status.UNKNOWN and "result field 1" in info.value.message
     assert store.total() == 1 << 40
 
 

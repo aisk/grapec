@@ -1,35 +1,23 @@
-from typing import Annotated
-
 import grapec
-from grapec import I32
-
-
-@grapec.struct(package="store")
-class NotFound(Exception):
-    key: str
-
-
-@grapec.struct(package="store")
-class Item:
-    key: str
-    count: Annotated[int, I32]
-    tags: list[str]
-
-
-class Store(grapec.Client, package="store"):
-    @grapec.raises(NotFound)
-    def get(self, key: str, limit: Annotated[int, I32]) -> Item: ...
-
-    def put(self, item: Item) -> None: ...
-
-    def total(self) -> int: ...
-
+from models import Item, NotFound, Store
 
 store = Store("thrift://127.0.0.1:9090", timeout=5)
 store.put(Item(key="apples", count=3, tags=["fruit"]))
+store.put(Item(key="pears", count=2, tags=["fruit"], note="ripe"))
 print(store.get("apples", limit=10))
+print(store.get("pears", limit=10))
 print("total:", store.total())
+
 try:
-    store.get("pears", 1)
+    store.get("plums", 1)
 except NotFound as exc:
     print("not found:", exc.key)
+
+try:
+    store.put(Item(key="locked", count=1, tags=[]))
+except grapec.RpcError as exc:
+    # the server raised Locked, which this client never declared
+    print("undeclared exception:", exc.code.name, exc.message)
+
+print("removed:", store.remove("pears"), "total:", store.total())
+grapec.close(store)

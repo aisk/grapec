@@ -248,8 +248,13 @@ def index_fields(fields: tuple[FieldSpec, ...]) -> dict[int, tuple[FieldSpec, Me
     return out
 
 
-def decode_fields(by_number: dict[int, tuple[FieldSpec, Member | None]], buf: bytes, pos: int) -> tuple[dict[str, Any], int]:
-    """Read a struct body up to and including STOP, returning the fields that were present."""
+def decode_fields(
+    by_number: dict[int, tuple[FieldSpec, Member | None]], buf: bytes, pos: int, unknown: list[int] | None = None
+) -> tuple[dict[str, Any], int]:
+    """Read a struct body up to and including STOP, returning the fields that were present.
+
+    Unknown fields are skipped, their numbers are appended to ``unknown`` when a list is given.
+    """
     values: dict[str, Any] = {}
     while True:
         ttype, pos = _read_byte(buf, pos)
@@ -258,6 +263,8 @@ def decode_fields(by_number: dict[int, tuple[FieldSpec, Member | None]], buf: by
         number, pos = _read(_FIELD_ID, buf, pos)
         entry = by_number.get(number)
         if entry is None:
+            if unknown is not None:
+                unknown.append(number)
             pos = skip(buf, pos, ttype)
             continue
         field, member = entry
@@ -486,8 +493,9 @@ def encode_call(spec: Any, arguments: dict[str, Any]) -> bytes:
 def decode_result(spec: Any, body: bytes) -> Any:
     """Return value of a REPLY body, raises the declared exception struct if one was set."""
     _, result, by_number = method_fields(spec)
+    unknown: list[int] = []
     try:
-        values, pos = decode_fields(by_number, body, 0)
+        values, pos = decode_fields(by_number, body, 0, unknown)
         if pos != len(body):
             raise ThriftError(f"{len(body) - pos} trailing bytes after result")
     except (ThriftError, UnicodeDecodeError) as exc:
@@ -496,6 +504,12 @@ def decode_result(spec: Any, body: bytes) -> Any:
         exc = values.get(field.name)
         if exc is not None:
             raise exc
+    if unknown:
+        # a result struct only holds the value and the declared exceptions, anything else
+        # is an exception the server declared and this client did not (also for void methods)
+        raise RpcError(
+            Status.UNKNOWN, f"{spec.name} raised an exception not declared with @raises (result field {unknown[0]})"
+        )
     if spec.returns is None:
         return None
     if "success" in values:
