@@ -35,12 +35,18 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
         if dataclasses.is_dataclass(cls):
             raise SchemaError(f"{cls.__qualname__} is already a dataclass")
         _inject_defaults(cls)
-        cls = dataclasses.dataclass(kw_only=True)(cls)
+        is_exception = issubclass(cls, BaseException)
+        if is_exception:
+            for attr in cls.__dict__.get("__annotations__", {}):
+                if hasattr(BaseException, attr):
+                    raise SchemaError(f"{cls.__qualname__}.{attr}: field name is taken by BaseException, rename it")
+        # exception structs (thrift `exception`) are raised and caught like any other,
+        # they hash by value like a frozen dataclass would
+        cls = dataclasses.dataclass(kw_only=True, unsafe_hash=is_exception)(cls)
         setattr(cls, PACKAGE_ATTR, package)
-        if issubclass(cls, BaseException):
-            # exception structs (thrift `exception`) are raised and caught like any other
+        if is_exception:
             cls.__str__ = cls.__repr__  # type: ignore[method-assign]
-            cls.__hash__ = object.__hash__  # type: ignore[method-assign]
+            cls.__reduce__ = _reduce_exception  # type: ignore[method-assign]
         cls.to_bytes = _to_bytes  # type: ignore[attr-defined]
         cls.__bytes__ = _bytes  # type: ignore[attr-defined]
         cls.from_bytes = classmethod(_from_bytes)  # type: ignore[attr-defined]
@@ -66,6 +72,15 @@ def _codec(name: str) -> Any:
 def _to_bytes(self: Any, *, codec: str = "protobuf") -> bytes:
     """Serialize with the given codec, ``"protobuf"`` (default) or ``"thrift"``."""
     return _codec(codec).encode(self)
+
+
+def _rebuild(cls: type, kwargs: dict[str, Any]) -> Any:
+    return cls(**kwargs)
+
+
+def _reduce_exception(self: Any) -> Any:
+    """``BaseException.__reduce__`` rebuilds from ``args``, ours are keyword only."""
+    return _rebuild, (type(self), {f.name: getattr(self, f.name) for f in dataclasses.fields(self)})
 
 
 def _bytes(self: Any) -> bytes:

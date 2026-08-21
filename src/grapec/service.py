@@ -25,7 +25,7 @@ import dataclasses
 import inspect
 from typing import Any, Callable, TypedDict, TypeVar, get_type_hints
 
-from .schema import Id, ListType, MapType, SchemaError, StructType, TypeSpec, is_struct, resolve_type, split_annotated, split_optional
+from .schema import Id, ListType, MapType, SchemaError, StructType, TypeSpec, apply_width, is_struct, resolve_type, split_annotated, split_optional
 from .struct import _PACKAGE_RE
 
 T = TypeVar("T")
@@ -94,15 +94,15 @@ class MethodSpec:
     """One remote method. ``params`` are the positional parameters after ``self``.
 
     ``returns`` is ``None`` for ``-> None`` (a thrift ``void``). ``raises``
-    lists the declared exception structs in ``@raises`` order, they take
-    result field ids 1, 2, ... on the thrift side.
+    holds ``(field id, class)`` pairs of the declared exception structs, the
+    ids are the thrift result field ids.
     """
 
     service: ServiceSpec
     name: str
     params: tuple[ParamSpec, ...]
     returns: TypeSpec | None
-    raises: tuple[type, ...]
+    raises: tuple[tuple[int, type], ...]
     python_name: str
     signature: inspect.Signature
 
@@ -113,7 +113,7 @@ class MethodSpec:
     @property
     def unary_struct(self) -> tuple[type, type] | None:
         """``(request, response)`` classes if the method is one struct in, one struct out."""
-        if len(self.params) == 1 and isinstance(self.params[0].type, StructType) and isinstance(self.returns, StructType):
+        if len(self.params) == 1 and not self.params[0].optional and isinstance(self.params[0].type, StructType) and isinstance(self.returns, StructType):
             return self.params[0].type.cls, self.returns.cls
         return None
 
@@ -135,18 +135,33 @@ def name(wire_name: str) -> Callable[[F], F]:
     return wrap
 
 
-def raises(*exceptions: type) -> Callable[[F], F]:
+def raises(*exceptions: Any) -> Callable[[F], F]:
     """Declare the exception structs a method may raise (thrift ``throws``).
 
     Each class must be a ``@grapec.struct`` that subclasses ``Exception``.
-    The order gives the result field ids. gRPC ignores the declaration.
+    They take result field ids 1, 2, ... in order, ``Annotated[Exc, Id(n)]``
+    pins one and the following ones continue from it. gRPC ignores the
+    declaration.
     """
-    for exc in exceptions:
+    out: list[tuple[int, type]] = []
+    used: set[int] = set()
+    last = 0
+    for item in exceptions:
+        exc, metadata = split_annotated(item)
         if not (isinstance(exc, type) and is_struct(exc) and issubclass(exc, Exception)):
             raise SchemaError(f"raises() expects struct classes that subclass Exception, got {exc!r}")
+        if any(e is exc for _, e in out):
+            raise SchemaError(f"raises() lists {exc.__qualname__} twice")
+        ids = [m.number for m in metadata if isinstance(m, Id)]
+        number = ids[0] if ids else last + 1
+        if number in used:
+            raise SchemaError(f"raises(): duplicate field id {number}")
+        used.add(number)
+        last = number
+        out.append((number, exc))
 
     def wrap(func: F) -> F:
-        setattr(func, RAISES_ATTR, tuple(exceptions))
+        setattr(func, RAISES_ATTR, tuple(out))
         return func
 
     return wrap
@@ -308,7 +323,7 @@ def _build_method(svc: ServiceSpec, attr: str, func: Callable[..., Any]) -> Meth
             raise SchemaError(f"{where}: duplicate parameter id {number}")
         used.add(number)
         last = number
-        spec = resolve_type(hint if not optional else inner, where=f"{where}({param.name})")
+        spec = apply_width(resolve_type(inner, where=f"{where}({param.name})"), metadata, where=f"{where}({param.name})")
         if optional and isinstance(spec, (ListType, MapType)):
             raise SchemaError(f"{where}: list and dict parameters cannot be optional")
         specs.append(ParamSpec(param.name, number, spec, optional))

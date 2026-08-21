@@ -10,7 +10,8 @@ from typing import Any, Awaitable, Callable, Protocol, TypeVar
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from . import thrift as _thrift
-from .errors import RpcError
+from .errors import RpcError, Status
+from .wire import WireError
 from .pool import Pool
 from .schema import SchemaError
 from .service import CallDetails, MethodSpec, method_of, remote_methods
@@ -101,7 +102,10 @@ class _GrpcProtocol:
 
     def decode(self, spec: MethodSpec, raw: bytes) -> Any:
         _, response_cls = spec.unary_struct  # type: ignore[misc]
-        return response_cls.from_bytes(raw)
+        try:
+            return response_cls.from_bytes(raw)
+        except (WireError, UnicodeDecodeError) as exc:
+            raise RpcError(Status.INTERNAL, f"malformed reply for {spec.path}: {exc}") from exc
 
 
 class _ThriftProtocol:
@@ -161,9 +165,9 @@ def _grpc_async(opts: TransportOptions, tls: bool) -> AsyncConnectionFactory:
 
 
 def _thrift_service(opts: TransportOptions) -> str | None:
-    """The multiplexed service name from ``?multiplexed=<name>`` (or ``=1`` for the class name)."""
+    """The multiplexed service name from ``?multiplexed=<name>``."""
     value = opts.query.get("multiplexed")
-    if value is None or value.lower() in ("0", "false", "no"):
+    if not value:
         return None
     return value
 
@@ -306,6 +310,7 @@ class Session(_BaseSession):
     def call(
         self,
         method: Callable[..., Resp],
+        /,
         *args: Any,
         timeout: float | None = None,
         metadata: Metadata | None = None,
@@ -392,6 +397,7 @@ class AsyncSession(_BaseSession):
     async def call(
         self,
         method: Callable[..., Resp],
+        /,
         *args: Any,
         timeout: float | None = None,
         metadata: Metadata | None = None,

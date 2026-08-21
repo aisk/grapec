@@ -6,13 +6,14 @@ Declare plain Python classes, call remote services with them.
 
 You write classes that look like dataclasses and a service class with typed
 method signatures. grapec turns the classes into dataclasses that speak the
-protobuf wire format and lets you call the methods on any standard gRPC
-server. No `.proto` files, no code generation, no C extensions. The only
-dependency is the pure Python `h2` library.
+protobuf wire format or the thrift binary protocol and lets you call the
+methods on any standard gRPC or thrift server. No `.proto` or `.thrift`
+files, no code generation, no C extensions. The only dependency is the pure
+Python `h2` library.
 
 Current scope: struct serialization and unary calls from sync and asyncio
-clients. Streaming and other protocols (thrift) come later, the public API is
-kept protocol neutral for that.
+clients over gRPC and thrift. Streaming comes later, the public API is kept
+protocol neutral.
 
 ## Install
 
@@ -115,7 +116,7 @@ service Greeter {
 
 - Declare a service by subclassing `grapec.Client` with a `package=` class argument. gRPC methods take one struct and return a struct, thrift methods may take several parameters of any supported type and return a scalar, container, struct or `None` (see [Thrift](#thrift)). A method shape the protocol cannot carry is rejected when the client is constructed. Bodies are never executed, `...` is enough. The base class owns `__init__` and has no public attributes of its own, so method names cannot clash with it.
 - Names are used as is on the wire. `@grapec.name("SayHello")` on a method or `name="Greeter"` next to `package=` pick a different wire name.
-- `Greeter(url, max_idle=4, max_idle_time=60, timeout=None, connect_timeout=10, compression=None, ssl=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS, `thrift://` and `thrifts://` for thrift. `ssl` takes an `ssl.SSLContext` for private CAs or client certificates, the default context verifies against the system trust store. grapec sets ALPN to `h2` on the context it is given.
+- `Greeter(url, max_idle=4, max_idle_time=60, timeout=None, connect_timeout=10, compression=None, ssl=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS, `thrift://` and `thrifts://` for thrift. `ssl` takes an `ssl.SSLContext` for private CAs or client certificates, the default context verifies against the system trust store. For `grpcs://` grapec sets ALPN to `h2` on the context it is given, for `thrifts://` the context is used as is.
 - Every method accepts `timeout=`, `metadata=`, `compression=` and `details=` keyword arguments at runtime. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
 - `metadata` is a dict of header values. Binary values must be `bytes` under a key ending in `-bin`.
 - Connections are pooled per client. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. Before an idle connection is reused, anything the server sent in the meantime (GOAWAY, a closed socket) is processed without blocking and a connection that turned out dead is replaced silently. Idle connections older than `max_idle_time` seconds are closed. A connection that fails during a call is dropped, the error is raised and never retried.
@@ -218,8 +219,9 @@ except NotFound as exc:
 ```
 
 - Method parameters become the fields of the thrift args struct, numbered 1, 2, ... in order or pinned with `Annotated[T, grapec.Id(n)]`. Python parameter names are not sent, so they may differ from the IDL, but they must not be named like a call option (`timeout`, `metadata`, `compression`, `details`). Calls accept positional and keyword arguments like a normal Python call.
-- `@grapec.raises(A, B)` lists the exception structs a method may raise, each a `@grapec.struct` that subclasses `Exception`. They take result field ids 1, 2, ... in that order. A server side exception the client did not declare surfaces as `RpcError` with `Status.UNKNOWN`.
-- `TApplicationException` replies become `RpcError`: `UNKNOWN_METHOD` maps to `Status.UNIMPLEMENTED`, protocol level failures to `Status.INTERNAL`.
+- `@grapec.raises(A, B)` lists the exception structs a method may raise, each a `@grapec.struct` that subclasses `Exception`. They take result field ids 1, 2, ... in that order, `Annotated[B, grapec.Id(5)]` pins one. A server side exception the client did not declare surfaces as `RpcError` with `Status.UNKNOWN`. Exception structs compare and hash by value, pickle, and must not use field names that `BaseException` owns (`args`, `add_note`, ...).
+- `TApplicationException` replies become `RpcError`: `UNKNOWN_METHOD` maps to `Status.UNIMPLEMENTED`, protocol level failures to `Status.INTERNAL`. A reply that cannot be decoded raises `RpcError` with `Status.INTERNAL` as well, the connection is kept because the frame boundary was intact.
+- One `Session` carries the multiplexed service name from its URL, so clients of two multiplexed services need two sessions.
 - `metadata=` and `compression=` raise `TypeError`, thrift has no headers. `details=` stays empty. A deadline that expires drops the connection, thrift cannot cancel a call in flight.
 - `export_proto` and gRPC sessions reject methods that are not one struct in, one struct out.
 
@@ -227,18 +229,22 @@ Struct level differences from the protobuf side:
 
 - Integers must match the width in the thrift IDL, `i64` is the default, use `Annotated[int, grapec.I8 | I16 | I32]` for the others. Sending the wrong width makes a standard server skip the field silently, grapec checks the value range on encode.
 - Zero values of plain fields are written (thrift has no implicit presence), `T | None` fields and unset unions are omitted. A Python union is a thrift `union` or a struct of optionals, both look the same on the wire.
-- `list[T]` accepts a thrift `set<T>` when decoding but always sends a list. `datetime` and `timedelta` are rejected with `SchemaError`. Field ids above 32767 are rejected too.
+- `list[T]` accepts a thrift `set<T>` when decoding but always sends a list, so a field declared `set<T>` on the server side is skipped by standard servers when you send it (a `Set` marker may come later if needed). `datetime` and `timedelta` are rejected with `SchemaError`. Field ids above 32767 are rejected too.
 - Unknown fields are skipped, a field whose wire type does not match the declaration raises `ThriftError`.
 
 ## Example
 
-`examples/hello/server.py` is a plain grpcio server compiled from `hello.proto`, standing in for a service written in any language. `client.py` talks to it with grapec only.
+`examples/hello/server.py` is a plain grpcio server compiled from `hello.proto`, standing in for a service written in any language. `client.py` talks to it with grapec only. `examples/store/` is the same for thrift, with a thriftpy2 server.
 
 ```
 cd examples/hello
 python server.py &
 python client.py
 python async_client.py
+
+cd examples/store
+python server.py &
+python client.py
 ```
 
 ## Development

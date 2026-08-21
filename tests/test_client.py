@@ -267,6 +267,12 @@ def test_service_signature_validation():
         class Bad3(grapec.Client, package="t"):
             def no_return(self, request: HelloRequest): ...
 
+    class OptionalRequest(grapec.Client, package="t"):
+        def call(self, request: HelloRequest | None) -> HelloReply: ...
+
+    with pytest.raises(grapec.SchemaError, match="gRPC methods take exactly one struct"):
+        OptionalRequest("grpc://127.0.0.1:1")
+
     with pytest.raises(grapec.SchemaError, match="clashes with a call option"):
 
         class Bad8(grapec.Client, package="t"):

@@ -44,6 +44,11 @@ class Store(grapec.Client, package="rpc"):
 
     def nope(self, key: str) -> Item: ...
 
+    def echo_opt(self, n: Annotated[int, I32] | None) -> Annotated[int, I32]: ...
+
+    @grapec.raises(NotFound, Annotated[Busy, grapec.Id(5)])
+    def pinned(self, key: str) -> Item: ...
+
 
 class AsyncStore(grapec.AsyncClient, package="rpc"):
     @grapec.raises(NotFound, Busy)
@@ -188,6 +193,72 @@ def test_connection_refused():
     client = Store(f"thrift://127.0.0.1:{_free_port()}", connect_timeout=1)
     with pytest.raises(grapec.TransportError, match="cannot connect"):
         client.total()
+
+
+def test_optional_parameter_keeps_its_width(store):
+    # review H1: the width marker was dropped on `Annotated[int, I32] | None`, the server skipped the field
+    assert store.echo_opt(5) == 5
+    assert store.echo_opt(None) == -1
+
+
+def test_pinned_exception_id(store):
+    # review L5
+    with pytest.raises(Busy) as info:
+        store.pinned("k")
+    assert info.value.retry_after == 5
+
+
+def test_parameter_named_method_is_fine_by_keyword(thrift_server):
+    # review M1: Session.call(self, method, ...) used to swallow the keyword
+    port, _ = thrift_server
+
+    class Odd(grapec.Client, package="rpc"):
+        @grapec.name("echo_opt")
+        def f(self, method: Annotated[int, I32] | None) -> Annotated[int, I32]: ...
+
+    client = Odd(f"thrift://127.0.0.1:{port}")
+    assert client.f(method=3) == 3
+    grapec.close(client)
+
+
+def test_malformed_reply_is_an_rpc_error(monkeypatch, store):
+    # review M3: decode failures must surface as RpcError and keep the connection
+    import grapec.thrift as t
+
+    real = t.decode_result
+
+    def broken(spec, body):
+        return real(spec, body + b"\x00")
+
+    monkeypatch.setattr(t, "decode_result", broken)
+    with pytest.raises(grapec.RpcError) as info:
+        store.total()
+    assert info.value.code is grapec.Status.INTERNAL and "trailing" in info.value.message
+    monkeypatch.undo()
+    assert store.total() == 1 << 40
+
+
+def test_raises_rejects_duplicates():
+    with pytest.raises(grapec.SchemaError, match="twice"):
+        grapec.raises(NotFound, NotFound)
+    with pytest.raises(grapec.SchemaError, match="duplicate field id"):
+        grapec.raises(NotFound, Annotated[Busy, grapec.Id(1)])
+
+
+def test_exception_structs_pickle_copy_and_hash():
+    # review M2, L4, L6
+    import copy
+    import pickle
+
+    exc = NotFound(key="k")
+    assert pickle.loads(pickle.dumps(exc)) == exc
+    assert copy.copy(exc) == exc and copy.deepcopy(exc) == exc
+    assert hash(NotFound(key="k")) == hash(exc) and {exc, NotFound(key="k")} == {exc}
+    with pytest.raises(grapec.SchemaError, match="BaseException"):
+
+        @grapec.struct(package="rpc")
+        class Bad(Exception):
+            args: list[str]
 
 
 # -- async ------------------------------------------------------------------

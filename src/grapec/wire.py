@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import struct as _struct
 
+from .errors import GrapecError
+
 VARINT = 0
 FIXED64 = 1
 LENGTH = 2
@@ -16,7 +18,7 @@ FIXED32 = 5
 _MASK64 = (1 << 64) - 1
 
 
-class WireError(ValueError):
+class WireError(GrapecError, ValueError):
     """Raised when bytes cannot be decoded."""
 
 

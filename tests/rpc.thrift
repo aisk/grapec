@@ -22,4 +22,6 @@ service Store {
   Item slow(),
   void boom(),
   Item undeclared(1: string key) throws (1: NotFound nf),
+  i32 echo_opt(1: optional i32 n),
+  Item pinned(1: string key) throws (1: NotFound nf, 5: Busy busy),
 }

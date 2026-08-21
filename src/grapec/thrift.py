@@ -15,7 +15,7 @@ from __future__ import annotations
 import struct as _struct
 from typing import Any
 
-from .errors import RpcError, Status, TransportError
+from .errors import GrapecError, RpcError, Status, TransportError
 from .protobuf import EncodeError, _check, _check_int
 from .schema import (
     DurationType,
@@ -59,7 +59,7 @@ _I32 = _struct.Struct(">i")
 _DOUBLE = _struct.Struct(">d")
 
 
-class ThriftError(ValueError):
+class ThriftError(GrapecError, ValueError):
     """Raised when bytes do not follow the thrift binary protocol."""
 
 
@@ -74,13 +74,17 @@ def check_schema(schema: StructSchema) -> None:
     """Reject structs that cannot be expressed in thrift, once per class."""
     if schema.cls in _checked:
         return
-    for field in schema.fields:
-        where = f"{schema.cls.__qualname__}.{field.name}"
-        for number in field.numbers():
-            if number > MAX_FIELD_ID:
-                raise SchemaError(f"{where}: field id {number} does not fit in thrift's i16")
-        _check_type(field.type, where)
-    _checked.add(schema.cls)
+    _checked.add(schema.cls)  # before the walk, structs may reference themselves
+    try:
+        for field in schema.fields:
+            where = f"{schema.cls.__qualname__}.{field.name}"
+            for number in field.numbers():
+                if number > MAX_FIELD_ID:
+                    raise SchemaError(f"{where}: field id {number} does not fit in thrift's i16")
+            _check_type(field.type, where)
+    except SchemaError:
+        _checked.discard(schema.cls)
+        raise
 
 
 def _check_type(spec: TypeSpec, where: str) -> None:
@@ -461,7 +465,9 @@ def method_fields(spec: Any) -> tuple[tuple[FieldSpec, ...], tuple[FieldSpec, ..
     if spec.returns is not None:
         _check_type(spec.returns, f"{where} return")
         result.append(FieldSpec("success", 0, spec.returns, True))
-    for number, exc in enumerate(spec.raises, 1):
+    for number, exc in spec.raises:
+        if number > MAX_FIELD_ID:
+            raise SchemaError(f"{where}: exception id {number} does not fit in thrift's i16")
         check_schema(schema_of(exc))
         result.append(FieldSpec(f"exception{number}", number, StructType(exc), True))
     cached = (args, tuple(result), index_fields(tuple(result)))
@@ -480,9 +486,12 @@ def encode_call(spec: Any, arguments: dict[str, Any]) -> bytes:
 def decode_result(spec: Any, body: bytes) -> Any:
     """Return value of a REPLY body, raises the declared exception struct if one was set."""
     _, result, by_number = method_fields(spec)
-    values, pos = decode_fields(by_number, body, 0)
-    if pos != len(body):
-        raise ThriftError(f"{len(body) - pos} trailing bytes after result")
+    try:
+        values, pos = decode_fields(by_number, body, 0)
+        if pos != len(body):
+            raise ThriftError(f"{len(body) - pos} trailing bytes after result")
+    except (ThriftError, UnicodeDecodeError) as exc:
+        raise RpcError(Status.INTERNAL, f"malformed reply for {spec.name}: {exc}") from exc
     for field in result[1:] if result and result[0].number == 0 else result:
         exc = values.get(field.name)
         if exc is not None:
@@ -587,7 +596,10 @@ class ThriftProtocol:
         mtype, body = self._reply
         self._call = self._reply = None
         if mtype == EXCEPTION:
-            raise application_error(body)
+            try:
+                raise application_error(body)
+            except ThriftError as exc:
+                raise RpcError(Status.INTERNAL, f"malformed TApplicationException: {exc}") from exc
         return body
 
     def abort(self) -> None:

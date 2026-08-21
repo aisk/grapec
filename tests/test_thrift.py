@@ -250,6 +250,23 @@ def test_width_marker_rules():
         Twice(n=0).to_bytes()
 
 
+def test_recursive_struct():
+    # review H2: check_schema recursed forever on self referencing structs
+    @grapec.struct(package="test.v1")
+    class Node:
+        children: list["Node"]
+        next: "Node | None"
+
+    obj = Node(children=[Node(children=[], next=None)], next=None)
+    data = obj.to_bytes(codec="thrift")
+    assert Node.from_bytes(data, codec="thrift") == obj
+
+
+def test_errors_are_grapec_errors():
+    assert issubclass(grapec.ThriftError, grapec.GrapecError)
+    assert issubclass(grapec.WireError, grapec.GrapecError)
+
+
 def test_unknown_codec():
     with pytest.raises(ValueError, match="unknown codec"):
         Inner(label="", weight=0).to_bytes(codec="avro")

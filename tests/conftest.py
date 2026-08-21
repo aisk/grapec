@@ -177,6 +177,12 @@ def thrift_server():
         def undeclared(self, key):
             raise rpc.NotFound(key=key)
 
+        def echo_opt(self, n):
+            return -1 if n is None else n
+
+        def pinned(self, key):
+            raise rpc.Busy(retry_after=5)
+
     port = _free_port()
     server = make_server(
         rpc.Store, Handler(), "127.0.0.1", port,
