@@ -20,10 +20,10 @@ Example::
     reply = greeter.say_hello(HelloRequest(name="x"))
 """
 
-from .codec import EncodeError
+from .protobuf import EncodeError
 from .errors import GrapecError, RpcError, Status, TransportError
 from .proto import export_proto
-from .schema import Id, SchemaError, is_struct
+from .schema import I8, I16, I32, I64, Id, SchemaError, is_struct
 from .service import (
     AsyncClient,
     CallDetails,
@@ -36,11 +36,16 @@ from .service import (
 )
 from .session import AsyncSession, Session
 from .struct import struct
+from .thrift import ThriftError
 from .wire import WireError
 
 __all__ = [
     "struct",
     "Id",
+    "I8",
+    "I16",
+    "I32",
+    "I64",
     "is_struct",
     "Client",
     "AsyncClient",
@@ -60,4 +65,5 @@ __all__ = [
     "SchemaError",
     "EncodeError",
     "WireError",
+    "ThriftError",
 ]

@@ -1,12 +1,13 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-grapec turns plain annotated Python classes into serializable structs that speak the protobuf wire format, and calls remote services described by annotated service classes. Python is the source of truth, there are no `.proto` files at runtime. The only runtime dependency is `h2`.
+grapec turns plain annotated Python classes into serializable structs that speak the protobuf wire format (and the thrift binary protocol), and calls remote services described by annotated service classes. Python is the source of truth, there are no `.proto` files at runtime. The only runtime dependency is `h2`.
 
 - `src/grapec/__init__.py`: public API (`struct`, `Id`, `is_struct`, error types).
 - `src/grapec/struct.py`: the `@struct(package=...)` decorator, turns the class into a keyword only dataclass and injects implicit defaults.
-- `src/grapec/schema.py`: resolves type hints into an internal, wire agnostic schema (`StructSchema`, `FieldSpec`, `TypeSpec`).
-- `src/grapec/codec.py`: encodes and decodes instances using the schema.
+- `src/grapec/schema.py`: resolves type hints into an internal, wire agnostic schema (`StructSchema`, `FieldSpec`, `TypeSpec`). `Annotated[int, I8/I16/I32]` sets `ScalarType.width`, 64 by default.
+- `src/grapec/protobuf.py`: encodes and decodes instances with the protobuf wire format using the schema.
+- `src/grapec/thrift.py`: the same for the thrift binary protocol (struct encoding only, no RPC yet). Validates the schema once per class and rejects what thrift cannot express.
 - `src/grapec/wire.py`: low level protobuf wire primitives (varint, tags, length delimited).
 - `src/grapec/dict.py`: `to_dict` / `from_dict` and the proto3 JSON mapping (`to_json` / `from_json`).
 - `src/grapec/proto.py`: `export_proto`, renders structs and services as proto3 source.
@@ -17,7 +18,7 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/sync.py` and `src/grapec/aio.py`: thin blocking socket and asyncio shells around `GrpcProtocol`.
 - `src/grapec/errors.py`: `Status`, `RpcError`, `TransportError`.
 - `examples/hello/`: demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
-- `tests/`: pytest suite. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server. `tests/test_protocol.py` drives `GrpcProtocol` against an h2 server connection without sockets, use it for frame level edge cases.
+- `tests/`: pytest suite. `tests/oracle.thrift` is loaded by `thriftpy2` as the thrift serialization reference. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server. `tests/test_protocol.py` drives `GrpcProtocol` against an h2 server connection without sockets, use it for frame level edge cases.
 
 Keep the schema layer free of wire format details, the clients free of gRPC details, and protocol state machines free of IO, so other protocols (thrift) plug in by adding a sans-IO protocol plus two thin IO shells.
 
@@ -37,7 +38,7 @@ Keep the schema layer free of wire format details, the clients free of gRPC deta
 
 ## Testing Guidelines
 - Add tests under `tests/`, name files `test_*.py`, cover normal and failure cases.
-- Wire format changes must be checked against the protobuf oracle, extend `tests/oracle.proto` when adding types.
+- Wire format changes must be checked against the protobuf oracle, extend `tests/oracle.proto` when adding types. The thrift codec is checked the same way against `thriftpy2` with `tests/oracle.thrift` (note `i8`, `i16`, `i32` are reserved words there, do not use them as field names).
 - Transport behaviour is tested against a real grpcio server (`rpc_server` fixture, `tls_rpc_server` for `grpcs://`, `serve` for short lived servers with custom channel options). Cover both `Client` and `AsyncClient` subclasses, async tests use `pytest-asyncio` in strict mode. Anything that can leave a connection in a bad state (cancellation, timeouts, GOAWAY) needs a test that the next call still works.
 - Run `uv run pytest` before opening a PR.
 

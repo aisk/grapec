@@ -6,8 +6,9 @@ import dataclasses
 import re
 from typing import Any, Callable, TypeVar, dataclass_transform, get_type_hints
 
-from . import codec as _codec
 from . import dict as _dict
+from . import protobuf as _protobuf
+from . import thrift as _thrift
 from .schema import PACKAGE_ATTR, SchemaError, split_annotated, split_union
 
 T = TypeVar("T")
@@ -24,7 +25,8 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
 
     ``package`` is the namespace the struct lives in on the wire side, for
     example ``"example.hello.v1"``. The decorated class becomes a keyword
-    only dataclass with ``to_bytes`` / ``from_bytes`` added.
+    only dataclass with ``to_bytes`` / ``from_bytes`` added. Both take
+    ``codec="protobuf"`` (default) or ``codec="thrift"``.
     """
     if not isinstance(package, str) or not _PACKAGE_RE.match(package):
         raise SchemaError(f"invalid package name {package!r}")
@@ -36,7 +38,7 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
         cls = dataclasses.dataclass(kw_only=True)(cls)
         setattr(cls, PACKAGE_ATTR, package)
         cls.to_bytes = _to_bytes  # type: ignore[attr-defined]
-        cls.__bytes__ = _to_bytes  # type: ignore[attr-defined]
+        cls.__bytes__ = _bytes  # type: ignore[attr-defined]
         cls.from_bytes = classmethod(_from_bytes)  # type: ignore[attr-defined]
         cls.to_dict = _dict.to_dict  # type: ignore[attr-defined]
         cls.from_dict = classmethod(_dict.from_dict)  # type: ignore[attr-defined]
@@ -47,12 +49,28 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
     return wrap
 
 
-def _to_bytes(self: Any) -> bytes:
-    return _codec.encode(self)
+_CODECS: dict[str, Any] = {"protobuf": _protobuf, "thrift": _thrift}
 
 
-def _from_bytes(cls: type[T], data: bytes | bytearray | memoryview) -> T:
-    return _codec.decode(cls, data)
+def _codec(name: str) -> Any:
+    try:
+        return _CODECS[name]
+    except KeyError:
+        raise ValueError(f"unknown codec {name!r}, expected one of {sorted(_CODECS)}") from None
+
+
+def _to_bytes(self: Any, *, codec: str = "protobuf") -> bytes:
+    """Serialize with the given codec, ``"protobuf"`` (default) or ``"thrift"``."""
+    return _codec(codec).encode(self)
+
+
+def _bytes(self: Any) -> bytes:
+    return _protobuf.encode(self)
+
+
+def _from_bytes(cls: type[T], data: bytes | bytearray | memoryview, *, codec: str = "protobuf") -> T:
+    """Parse bytes produced by the given codec, ``"protobuf"`` (default) or ``"thrift"``."""
+    return _codec(codec).decode(cls, data)
 
 
 def _inject_defaults(cls: type) -> None:

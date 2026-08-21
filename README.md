@@ -73,6 +73,9 @@ data = bytes(req)                       # or req.to_bytes()
 same = HelloRequest.from_bytes(data)
 assert same == req
 
+req.to_bytes(codec="thrift")            # thrift binary protocol instead of protobuf
+HelloRequest.from_bytes(data, codec="thrift")
+
 req.to_dict()                           # plain Python values, for logs and tests
 req.to_json()                           # proto3 JSON mapping, for gateways
 HelloRequest.from_dict({...})           # accepts both shapes
@@ -184,7 +187,18 @@ Errors:
 | `datetime` | `google.protobuf.Timestamp` (naive values are treated as local time) |
 | `timedelta` | `google.protobuf.Duration` |
 
-`int32` and `uint32` share the varint encoding with `int64`, so only `int` is exposed. `uint64` values above 2^63 come back negative. `sint*` (zigzag) and `fixed*` use a different encoding and are not supported. `float32`, `Any` and proto2 features are out of scope for now.
+`int32` and `uint32` share the varint encoding with `int64`, so `int` is `int64` by default. `Annotated[int, grapec.I32]` (also `I8`, `I16`) narrows it, protobuf only changes the exported type to `int32`, thrift needs it to pick the wire type. `uint64` values above 2^63 come back negative. `sint*` (zigzag) and `fixed*` use a different encoding and are not supported. `float32`, `Any` and proto2 features are out of scope for now.
+
+## Thrift
+
+The same structs serialize with the thrift binary protocol through `to_bytes(codec="thrift")` / `from_bytes(data, codec="thrift")`. Field ids are the thrift field ids, so `Id(n)` and the declaration order rules apply unchanged. Differences from the protobuf side:
+
+- Integers must match the width in the thrift IDL, `i64` is the default, use `Annotated[int, grapec.I8 | I16 | I32]` for the others. Sending the wrong width makes a standard server skip the field silently, grapec checks the value range on encode.
+- Zero values of plain fields are written (thrift has no implicit presence), `T | None` fields and unset unions are omitted. A Python union is a thrift `union` or a struct of optionals, both look the same on the wire.
+- `list[T]` accepts a thrift `set<T>` when decoding but always sends a list. `datetime` and `timedelta` are rejected with `SchemaError`. Field ids above 32767 are rejected too.
+- Unknown fields are skipped, a field whose wire type does not match the declaration raises `ThriftError`.
+
+thrift RPC (`thrift://`) is not available yet.
 
 ## Example
 

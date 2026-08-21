@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .codec import EncodeError
+from .protobuf import EncodeError
 from .schema import (
     DurationType,
     EnumType,

@@ -99,8 +99,8 @@ def export_proto(*roots: type) -> str:
     def type_name(spec: TypeSpec) -> str:
         nonlocal needs_timestamp, needs_duration
         match spec:
-            case ScalarType(kind):
-                return _SCALAR_NAMES[kind]
+            case ScalarType(kind, width):
+                return "int32" if kind == "int" and width < 64 else _SCALAR_NAMES[kind]
             case EnumType(cls):
                 pkg = enums[cls]
                 return cls.__name__ if pkg == package else f"{pkg}.{cls.__name__}"

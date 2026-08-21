@@ -40,8 +40,29 @@ Scalar = Literal["int", "float", "str", "bytes", "bool"]
 
 
 @dataclasses.dataclass(frozen=True)
+class Width:
+    """Integer width marker, used inside ``Annotated[int, I32]``.
+
+    protobuf ignores it (every int is a varint), thrift needs it because
+    i8, i16, i32 and i64 are distinct wire types.
+    """
+
+    bits: Literal[8, 16, 32, 64]
+
+    def __repr__(self) -> str:
+        return f"I{self.bits}"
+
+
+I8 = Width(8)
+I16 = Width(16)
+I32 = Width(32)
+I64 = Width(64)
+
+
+@dataclasses.dataclass(frozen=True)
 class ScalarType:
     kind: Scalar
+    width: int = 64
 
 
 @dataclasses.dataclass(frozen=True)
@@ -219,8 +240,30 @@ def split_annotated(tp: Any) -> tuple[Any, tuple[Any, ...]]:
     return tp, ()
 
 
+def _width_of(metadata: tuple[Any, ...], *, where: str) -> Width | None:
+    widths = [m for m in metadata if isinstance(m, Width)]
+    if len(widths) > 1:
+        raise SchemaError(f"{where}: more than one width annotation")
+    return widths[0] if widths else None
+
+
+def apply_width(spec: TypeSpec, metadata: tuple[Any, ...], *, where: str) -> TypeSpec:
+    width = _width_of(metadata, where=where)
+    if width is None:
+        return spec
+    if not isinstance(spec, ScalarType) or spec.kind != "int":
+        raise SchemaError(f"{where}: {width!r} only applies to int")
+    if spec.width != 64 and spec.width != width.bits:
+        raise SchemaError(f"{where}: conflicting width annotations")
+    return ScalarType("int", width.bits)
+
+
 def resolve_type(tp: Any, *, where: str) -> TypeSpec:
-    tp, _ = split_annotated(tp)
+    tp, metadata = split_annotated(tp)
+    return apply_width(_resolve_bare(tp, where=where), metadata, where=where)
+
+
+def _resolve_bare(tp: Any, *, where: str) -> TypeSpec:
     origin = get_origin(tp)
 
     if origin is list:
@@ -317,7 +360,7 @@ def build_schema(cls: type) -> StructSchema:
 
         inner, more = split_annotated(members[0])
         metadata = metadata + more
-        spec = resolve_type(inner, where=where)
+        spec = apply_width(resolve_type(inner, where=where), metadata, where=where)
         if optional and isinstance(spec, (ListType, MapType)):
             raise SchemaError(f"{where}: list and dict fields cannot be optional")
         fields.append(FieldSpec(name, take_number(metadata), spec, optional))
@@ -330,7 +373,7 @@ def _resolve_oneof(members: list[Any], take_number: Any, where: str) -> OneOfTyp
     seen: list[type] = []
     for member in members:
         inner, metadata = split_annotated(member)
-        spec = resolve_type(inner, where=where)
+        spec = resolve_type(member, where=where)
         if isinstance(spec, (ListType, MapType)):
             raise SchemaError(f"{where}: union members cannot be list or dict")
         py = python_type_of(spec)
