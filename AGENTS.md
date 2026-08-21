@@ -17,6 +17,7 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/grpc.py`: sans-IO gRPC over HTTP/2 state machine on top of `h2`, the only place that knows gRPC framing and headers. Never touches a socket. Feeds h2 one frame at a time so a response that completes right before a GOAWAY survives, ignores RST_STREAM after END_STREAM, and cancels a stream with RST_STREAM(CANCEL) on deadline expiry instead of dropping the connection.
 - `src/grapec/sync.py` and `src/grapec/aio.py`: thin blocking socket and asyncio shells around `GrpcProtocol` and `ThriftProtocol`.
 - `src/grapec/errors.py`: `Status`, `RpcError`, `TransportError`.
+- `docs/reference.md`: the full user facing reference. The README stays a short introduction, document new public behaviour in the reference.
 - `examples/hello/`: gRPC demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
 - `examples/store/`: thrift demo, `server.py` is a thriftpy2 server, `client.py` uses grapec only.
 - `tests/`: pytest suite. `tests/oracle.thrift` and `tests/rpc.thrift` are loaded by `thriftpy2`, the first as the serialization reference, the second to run a real thrift server. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server. `tests/test_protocol.py` drives `GrpcProtocol` against an h2 server connection without sockets, use it for frame level edge cases.
