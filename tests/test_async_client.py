@@ -84,6 +84,62 @@ async def test_concurrent_calls_share_pool(url):
     await grapec.aclose(g)
 
 
+async def test_max_conns_caps_open_connections(url):
+    g = AsyncGreeter(url, max_conns=2, max_idle=2)
+    session = grapec.session_of(g)
+    factory = session._factory
+    made = []
+    paired = asyncio.Barrier(2)  # only passable if two calls really run at once
+
+    async def counting():
+        conn = await factory()
+        unary = conn.unary
+
+        async def held_unary(*args, **kwargs):
+            await paired.wait()
+            return await unary(*args, **kwargs)
+
+        conn.unary = held_unary
+        made.append(conn)
+        return conn
+
+    session._factory = counting
+    replies = await asyncio.gather(*(g.say_hello(HelloRequest(name=str(i))) for i in range(8)))
+    assert sorted(r.message for r in replies) == sorted(f"hello {i} 0" for i in range(8))
+    assert len(made) == 2
+    assert len(session._pool) == 2
+    await grapec.aclose(g)
+
+
+async def test_pool_timeout_when_all_connections_are_busy(url):
+    g = AsyncGreeter(url, max_conns=1, pool_timeout=0.05)
+    session = grapec.session_of(g)
+    busy = await session._acquire()
+    with pytest.raises(grapec.RpcError) as exc:
+        await g.say_hello(HelloRequest(name="x"))
+    assert exc.value.code is grapec.Status.RESOURCE_EXHAUSTED
+    await session._release(busy)
+    assert (await g.say_hello(HelloRequest(name="ok"))).message == "hello ok 0"
+    await grapec.aclose(g)
+
+
+async def test_failed_connect_gives_its_permit_back(url):
+    g = AsyncGreeter(url, max_conns=1, pool_timeout=0.05)
+    session = grapec.session_of(g)
+    factory = session._factory
+
+    async def refuse():
+        raise grapec.TransportError("no route")
+
+    session._factory = refuse
+    for _ in range(3):
+        with pytest.raises(grapec.TransportError):
+            await g.say_hello(HelloRequest(name="x"))
+    session._factory = factory
+    assert (await g.say_hello(HelloRequest(name="ok"))).message == "hello ok 0"
+    await grapec.aclose(g)
+
+
 async def test_shared_session(url):
     async with grapec.AsyncSession(url) as session:
         a = AsyncGreeter(session)

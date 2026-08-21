@@ -6,6 +6,8 @@ share a session. ``Session.call`` is the low level entry point.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
@@ -212,6 +214,8 @@ class _BaseSession:
         *,
         max_idle: int,
         max_idle_time: float | None,
+        max_conns: int | None,
+        pool_timeout: float | None,
         timeout: float | None,
         connect_timeout: float | None,
         compression: str | None,
@@ -223,6 +227,12 @@ class _BaseSession:
         self._parsed = urlsplit(url)
         self._connect_timeout = connect_timeout
         self._ssl = ssl
+        if max_conns is not None and max_conns < 1:
+            raise ValueError(f"max_conns must be at least 1, got {max_conns}")
+        if pool_timeout is not None and pool_timeout < 0:
+            raise ValueError(f"pool_timeout must not be negative, got {pool_timeout}")
+        self._max_conns = max_conns
+        self._pool_timeout = pool_timeout
         self._pool: Pool[Any] = Pool(max_idle, max_idle_time)
         try:
             self._protocol = _PROTOCOLS[self._parsed.scheme]
@@ -263,6 +273,10 @@ class _BaseSession:
         )
 
 
+def _exhausted(timeout: float | None) -> RpcError:
+    return RpcError(Status.RESOURCE_EXHAUSTED, f"no connection available within {timeout}s, the pool is at max_conns")
+
+
 def _record(details: CallDetails | None, headers: Metadata, trailers: Metadata) -> None:
     if details is not None:
         details.headers = headers
@@ -279,6 +293,14 @@ class Session(_BaseSession):
     A connection that fails below the application level is dropped, the
     error is raised to the caller and never retried.
 
+    A connection carries one call at a time, so N concurrent calls need N
+    connections. ``max_conns`` caps how many the session may have open at
+    once, ``None`` (the default) means no cap. Once they are all busy a call
+    waits for one to come back, at most ``pool_timeout`` seconds (``None``
+    waits forever, ``0`` fails right away) before raising ``RpcError`` with
+    ``Status.RESOURCE_EXHAUSTED``. Without ``max_conns`` a call never waits
+    and ``pool_timeout`` is unused.
+
     ``compression`` (``"gzip"`` or ``"deflate"``) compresses outgoing
     requests. Compressed responses are always accepted. ``ssl`` is an
     ``ssl.SSLContext`` for ``grpcs://`` URLs, the default context verifies
@@ -291,6 +313,8 @@ class Session(_BaseSession):
         *,
         max_idle: int = 4,
         max_idle_time: float | None = 60,
+        max_conns: int | None = None,
+        pool_timeout: float | None = None,
         timeout: float | None = None,
         connect_timeout: float | None = 10,
         compression: str | None = None,
@@ -300,12 +324,16 @@ class Session(_BaseSession):
             url,
             max_idle=max_idle,
             max_idle_time=max_idle_time,
+            max_conns=max_conns,
+            pool_timeout=pool_timeout,
             timeout=timeout,
             connect_timeout=connect_timeout,
             compression=compression,
             ssl=ssl,
         )
         self._factory: ConnectionFactory = self._lookup(_SYNC_SCHEMES)
+        # bounded so that a permit released without a matching acquire fails loudly
+        self._permits = threading.BoundedSemaphore(max_conns) if max_conns is not None else None
 
     def call(
         self,
@@ -353,24 +381,42 @@ class Session(_BaseSession):
             pass
 
     def _acquire(self) -> Connection:
-        while True:
-            conn, stale = self._pool.take()
-            for old in stale:
-                old.close()
-            if conn is None:
-                return self._factory()
-            conn.poll()
-            if conn.healthy:
-                return conn
-            conn.close()
+        permits = self._permits
+        if permits is not None and not permits.acquire(timeout=self._pool_timeout):
+            raise _exhausted(self._pool_timeout)
+        try:
+            while True:
+                conn, stale = self._pool.take()
+                for old in stale:
+                    old.close()
+                if conn is None:
+                    return self._factory()
+                conn.poll()
+                if conn.healthy:
+                    return conn
+                conn.close()
+        except BaseException:
+            self._release_permit()
+            raise
+
+    def _release_permit(self) -> None:
+        if self._permits is not None:
+            self._permits.release()
 
     def _release(self, conn: Connection) -> None:
-        if not (conn.healthy and self._pool.give_back(conn)):
-            conn.close()
+        try:
+            if not (conn.healthy and self._pool.give_back(conn)):
+                conn.close()
+        finally:
+            self._release_permit()
 
 
 class AsyncSession(_BaseSession):
-    """asyncio twin of :class:`Session`, same options and pooling rules."""
+    """asyncio twin of :class:`Session`, same options and pooling rules.
+
+    ``max_conns`` is counted per session, the semaphore behind it binds to
+    the loop of the first call, so a session belongs to one event loop.
+    """
 
     def __init__(
         self,
@@ -378,6 +424,8 @@ class AsyncSession(_BaseSession):
         *,
         max_idle: int = 4,
         max_idle_time: float | None = 60,
+        max_conns: int | None = None,
+        pool_timeout: float | None = None,
         timeout: float | None = None,
         connect_timeout: float | None = 10,
         compression: str | None = None,
@@ -387,12 +435,16 @@ class AsyncSession(_BaseSession):
             url,
             max_idle=max_idle,
             max_idle_time=max_idle_time,
+            max_conns=max_conns,
+            pool_timeout=pool_timeout,
             timeout=timeout,
             connect_timeout=connect_timeout,
             compression=compression,
             ssl=ssl,
         )
         self._factory: AsyncConnectionFactory = self._lookup(_ASYNC_SCHEMES)
+        # made on first use, an asyncio.Semaphore binds to the loop that awaits it
+        self._permits: asyncio.Semaphore | None = None
 
     async def call(
         self,
@@ -440,17 +492,37 @@ class AsyncSession(_BaseSession):
             pass
 
     async def _acquire(self) -> AsyncConnection:
-        while True:
-            conn, stale = self._pool.take()
-            for old in stale:
-                old.close()
-            if conn is None:
-                return await self._factory()
-            await conn.poll()
-            if conn.healthy:
-                return conn
-            conn.close()
+        if self._max_conns is not None:
+            permits = self._permits
+            if permits is None:
+                permits = self._permits = asyncio.Semaphore(self._max_conns)
+            try:
+                async with asyncio.timeout(self._pool_timeout):
+                    await permits.acquire()
+            except TimeoutError:
+                raise _exhausted(self._pool_timeout) from None
+        try:
+            while True:
+                conn, stale = self._pool.take()
+                for old in stale:
+                    old.close()
+                if conn is None:
+                    return await self._factory()
+                await conn.poll()
+                if conn.healthy:
+                    return conn
+                conn.close()
+        except BaseException:
+            self._release_permit()
+            raise
+
+    def _release_permit(self) -> None:
+        if self._permits is not None:
+            self._permits.release()
 
     async def _release(self, conn: AsyncConnection) -> None:
-        if not (conn.healthy and self._pool.give_back(conn)):
-            await conn.aclose()
+        try:
+            if not (conn.healthy and self._pool.give_back(conn)):
+                await conn.aclose()
+        finally:
+            self._release_permit()
