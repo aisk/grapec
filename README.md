@@ -116,10 +116,11 @@ service Greeter {
 
 - Declare a service by subclassing `grapec.Client` with a `package=` class argument. gRPC methods take one struct and return a struct, thrift methods may take several parameters of any supported type and return a scalar, container, struct or `None` (see [Thrift](#thrift)). A method shape the protocol cannot carry is rejected when the client is constructed. Bodies are never executed, `...` is enough. The base class owns `__init__` and has no public attributes of its own, so method names cannot clash with it.
 - Names are used as is on the wire. `@grapec.name("SayHello")` on a method or `name="Greeter"` next to `package=` pick a different wire name.
-- `Greeter(url, max_idle=4, max_idle_time=60, timeout=None, connect_timeout=10, compression=None, ssl=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS, `thrift://` and `thrifts://` for thrift. `ssl` takes an `ssl.SSLContext` for private CAs or client certificates, the default context verifies against the system trust store. For `grpcs://` grapec sets ALPN to `h2` on the context it is given, for `thrifts://` the context is used as is.
+- `Greeter(url, max_idle=4, max_idle_time=60, max_conns=None, pool_timeout=None, timeout=None, connect_timeout=10, compression=None, ssl=None)` connects on first call. The URL scheme selects the protocol: `grpc://host:port` for plaintext, `grpcs://host:port` for TLS, `thrift://` and `thrifts://` for thrift. `ssl` takes an `ssl.SSLContext` for private CAs or client certificates, the default context verifies against the system trust store. For `grpcs://` grapec sets ALPN to `h2` on the context it is given, for `thrifts://` the context is used as is.
 - Every method accepts `timeout=`, `metadata=`, `compression=` and `details=` keyword arguments at runtime. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
 - `metadata` is a dict of header values. Binary values must be `bytes` under a key ending in `-bin`.
 - Connections are pooled per client. After a call the connection goes back to the pool if it is still healthy, up to `max_idle`. Before an idle connection is reused, anything the server sent in the meantime (GOAWAY, a closed socket) is processed without blocking and a connection that turned out dead is replaced silently. Idle connections older than `max_idle_time` seconds are closed. A connection that fails during a call is dropped, the error is raised and never retried.
+- A connection carries one call at a time, so eight concurrent calls need eight connections. `max_conns` caps how many a client may have open at once, `None` means no cap. When they are all busy the next call waits for one to be returned, for at most `pool_timeout` seconds (`None` waits forever, `0` fails immediately), then raises `RpcError` with `Status.RESOURCE_EXHAUSTED`. `max_idle` only decides how many of them are kept once they fall idle, so `max_conns=8, max_idle=8` serves a burst of eight without reconnecting next time.
 - A deadline that expires cancels the stream and keeps the connection.
 - Pass a `grapec.CallDetails()` as `details=` to receive the response headers and trailers: `d = grapec.CallDetails(); greeter.say_hello(req, details=d); d.trailers["x-request-id"]`. Binary values (`-bin` keys) come back as `bytes`. For a trailers-only response everything is reported as trailers, like other gRPC clients do.
 - Subclassing a client class inherits its methods. Pass `name=` on the subclass to call the inherited methods under the new service name, without it they keep the parent's paths.
@@ -144,7 +145,7 @@ replies = await asyncio.gather(*(greeter.say_hello(r) for r in requests))
 await grapec.aclose(greeter)
 ```
 
-Same options and pooling rules. Concurrent calls each get their own connection from the pool. `grapec.AsyncSession` is the shareable counterpart of `Session`.
+Same options and pooling rules. Concurrent calls each get their own connection from the pool, `max_conns` bounds how many, and a session with `max_conns` belongs to the event loop of its first call. `grapec.AsyncSession` is the shareable counterpart of `Session`.
 
 Errors:
 

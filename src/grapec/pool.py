@@ -2,7 +2,10 @@
 
 The pool never blocks and never creates connections itself, the owner does
 that outside the lock. The lock is only held for list operations, so it is
-safe to use from asyncio code as well.
+safe to use from asyncio code as well. ``max_conns``, the cap on how many
+connections exist at all, is enforced by the session around ``take`` and
+``give_back`` because waiting for a permit needs a threading or an asyncio
+primitive depending on the caller.
 """
 
 from __future__ import annotations

@@ -175,6 +175,81 @@ def test_pool_concurrent_calls(url):
     grapec.close(g)
 
 
+def test_max_conns_caps_open_connections(url):
+    """Eight concurrent calls through a cap of two never open a third connection."""
+    g = Greeter(url, max_conns=2, max_idle=2)
+    session = grapec.session_of(g)
+    factory = session._factory
+    made = []
+    lock = threading.Lock()
+    paired = threading.Barrier(2, timeout=10)  # only passable if two calls really run at once
+
+    def counting():
+        conn = factory()
+        unary = conn.unary
+
+        def held_unary(*args, **kwargs):
+            paired.wait()
+            return unary(*args, **kwargs)
+
+        conn.unary = held_unary
+        with lock:
+            made.append(conn)
+        return conn
+
+    session._factory = counting
+    results = []
+
+    def work(i):
+        results.append(g.say_hello(HelloRequest(name=str(i))).message)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == sorted(f"hello {i} 0" for i in range(8))
+    assert len(made) == 2
+    assert len(session._pool) == 2
+    grapec.close(g)
+
+
+def test_pool_timeout_when_all_connections_are_busy(url):
+    g = Greeter(url, max_conns=1, pool_timeout=0.05)
+    session = grapec.session_of(g)
+    busy = session._acquire()  # the one allowed connection is checked out
+    with pytest.raises(grapec.RpcError) as exc:
+        g.say_hello(HelloRequest(name="x"))
+    assert exc.value.code is grapec.Status.RESOURCE_EXHAUSTED
+    session._release(busy)
+    assert g.say_hello(HelloRequest(name="ok")).message == "hello ok 0"
+    grapec.close(g)
+
+
+def test_failed_connect_gives_its_permit_back(url):
+    g = Greeter(url, max_conns=1, pool_timeout=0.05)
+    session = grapec.session_of(g)
+    factory = session._factory
+
+    def refuse():
+        raise grapec.TransportError("no route")
+
+    session._factory = refuse
+    for _ in range(3):
+        with pytest.raises(grapec.TransportError):  # not RESOURCE_EXHAUSTED, the permit came back
+            g.say_hello(HelloRequest(name="x"))
+    session._factory = factory
+    assert g.say_hello(HelloRequest(name="ok")).message == "hello ok 0"
+    grapec.close(g)
+
+
+def test_invalid_pool_options(url):
+    with pytest.raises(ValueError):
+        grapec.Session(url, max_conns=0)
+    with pytest.raises(ValueError):
+        grapec.Session(url, pool_timeout=-1)
+
+
 def test_shared_session(url):
     class Other(grapec.Client, package="test.rpc", name="Greeter"):
         @grapec.name("SayHello")

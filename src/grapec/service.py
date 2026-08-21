@@ -273,9 +273,10 @@ class _ClientBase:
 class Client(_ClientBase):
     """Base class for sync service clients. Subclass with ``package=...`` and ``def`` methods.
 
-    Construct with a URL plus ``Session`` options (``max_idle``, ``timeout``,
-    ``connect_timeout``, ``compression``) or with an existing ``Session`` to
-    share connections between several clients.
+    Construct with a URL plus ``Session`` options (``max_idle``,
+    ``max_conns``, ``pool_timeout``, ``timeout``, ``connect_timeout``,
+    ``compression``) or with an existing ``Session`` to share connections
+    between several clients.
     """
 
     __grapec_async__ = False
