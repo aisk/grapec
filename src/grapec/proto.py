@@ -74,9 +74,11 @@ def export_proto(*roots: type) -> str:
             services.append(svc)
             for value in remote_methods(root).values():
                 spec = value.spec
+                if spec.unary_struct is None:
+                    raise SchemaError(f"{spec.service.cls.__qualname__}.{spec.python_name}: only methods with one struct parameter and a struct return can be exported to proto")
                 methods.append(spec)
-                visit_struct(spec.request)
-                visit_struct(spec.response)
+                for cls in spec.unary_struct:
+                    visit_struct(cls)
             pkg = svc.package
         elif is_struct(root):
             visit_struct(root)
@@ -126,7 +128,8 @@ def export_proto(*roots: type) -> str:
         own = [m for m in methods if m.service is svc]
         lines = [f"service {svc.name} {{"]
         for m in own:
-            lines.append(f"  rpc {m.name} ({type_name(StructType(m.request))}) returns ({type_name(StructType(m.response))});")
+            request, response = m.unary_struct  # type: ignore[misc]
+            lines.append(f"  rpc {m.name} ({type_name(StructType(request))}) returns ({type_name(StructType(response))});")
         lines.append("}")
         body.append("\n".join(lines))
 

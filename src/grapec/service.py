@@ -12,7 +12,9 @@ for ``async def`` methods) with a ``package`` class argument::
 
 The base classes own ``__init__`` and keep no public attributes, so method
 names never clash with grapec internals. Calls accept ``timeout``,
-``metadata`` and ``compression`` keyword arguments at runtime. Declare
+``metadata`` and ``compression`` keyword arguments at runtime. Methods
+may take several parameters and return scalars for protocols that allow it
+(thrift), gRPC methods take one struct and return one struct. Declare
 ``**options: Unpack[grapec.CallOptions]`` on a method if you want type
 checkers to know about them. Closing goes through ``grapec.close``.
 """
@@ -23,7 +25,7 @@ import dataclasses
 import inspect
 from typing import Any, Callable, TypedDict, TypeVar, get_type_hints
 
-from .schema import SchemaError, is_struct
+from .schema import Id, ListType, MapType, SchemaError, StructType, TypeSpec, is_struct, resolve_type, split_annotated, split_optional
 from .struct import _PACKAGE_RE
 
 T = TypeVar("T")
@@ -32,6 +34,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 SERVICE_ATTR = "__grapec_service__"
 METHOD_ATTR = "__grapec_method__"
 NAME_ATTR = "__grapec_name__"
+RAISES_ATTR = "__grapec_raises__"
 _SESSION_ATTR = "__grapec_session__"
 _OWNED_ATTR = "__grapec_owns_session__"
 _BOUND_ATTR = "__grapec_bound__"
@@ -79,16 +82,45 @@ class ServiceSpec:
 
 
 @dataclasses.dataclass(frozen=True)
+class ParamSpec:
+    name: str
+    number: int
+    type: TypeSpec
+    optional: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class MethodSpec:
+    """One remote method. ``params`` are the positional parameters after ``self``.
+
+    ``returns`` is ``None`` for ``-> None`` (a thrift ``void``). ``raises``
+    lists the declared exception structs in ``@raises`` order, they take
+    result field ids 1, 2, ... on the thrift side.
+    """
+
     service: ServiceSpec
     name: str
-    request: type
-    response: type
+    params: tuple[ParamSpec, ...]
+    returns: TypeSpec | None
+    raises: tuple[type, ...]
     python_name: str
+    signature: inspect.Signature
 
     @property
     def path(self) -> str:
         return f"/{self.service.full_name}/{self.name}"
+
+    @property
+    def unary_struct(self) -> tuple[type, type] | None:
+        """``(request, response)`` classes if the method is one struct in, one struct out."""
+        if len(self.params) == 1 and isinstance(self.params[0].type, StructType) and isinstance(self.returns, StructType):
+            return self.params[0].type.cls, self.returns.cls
+        return None
+
+    def bind(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Map call arguments onto parameter names, like Python would."""
+        bound = self.signature.bind(*args, **kwargs)
+        return dict(bound.arguments)
 
 
 def name(wire_name: str) -> Callable[[F], F]:
@@ -98,6 +130,23 @@ def name(wire_name: str) -> Callable[[F], F]:
 
     def wrap(func: F) -> F:
         setattr(func, NAME_ATTR, wire_name)
+        return func
+
+    return wrap
+
+
+def raises(*exceptions: type) -> Callable[[F], F]:
+    """Declare the exception structs a method may raise (thrift ``throws``).
+
+    Each class must be a ``@grapec.struct`` that subclasses ``Exception``.
+    The order gives the result field ids. gRPC ignores the declaration.
+    """
+    for exc in exceptions:
+        if not (isinstance(exc, type) and is_struct(exc) and issubclass(exc, Exception)):
+            raise SchemaError(f"raises() expects struct classes that subclass Exception, got {exc!r}")
+
+    def wrap(func: F) -> F:
+        setattr(func, RAISES_ATTR, tuple(exceptions))
         return func
 
     return wrap
@@ -130,11 +179,9 @@ class _RemoteMethod:
 
 
 def _bind(spec: MethodSpec, session: Any) -> Callable[..., Any]:
-    def call(request: Any, /, **options: Any) -> Any:
-        unknown = set(options) - _OPTION_KEYS
-        if unknown:
-            raise TypeError(f"{spec.python_name}() got unexpected keyword argument(s): {', '.join(sorted(unknown))}")
-        return session.call(spec, request, **options)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        options = {key: kwargs.pop(key) for key in _OPTION_KEYS if key in kwargs}
+        return session.call(spec, *args, **kwargs, **options)
 
     call.__name__ = spec.python_name
     call.__qualname__ = f"{spec.service.cls.__qualname__}.{spec.python_name}"
@@ -177,7 +224,7 @@ class _ClientBase:
                     setattr(cls, attr, _RemoteMethod(dataclasses.replace(value.spec, service=spec), value.__wrapped__))
 
     def __init__(self, target: Any, **options: Any) -> None:
-        from .session import AsyncSession, Session
+        from .session import AsyncSession, Session, check_service
 
         wanted = AsyncSession if type(self).__grapec_async__ else Session
         if isinstance(target, str):
@@ -192,6 +239,7 @@ class _ClientBase:
             raise TypeError(f"{type(self).__qualname__} needs a {wanted.__name__}, got {type(target).__name__}")
         else:
             raise TypeError(f"expected a URL or {wanted.__name__}, got {type(target).__qualname__}")
+        check_service(session, type(self))
         self.__dict__[_SESSION_ATTR] = session
         self.__dict__[_OWNED_ATTR] = owned
 
@@ -231,19 +279,46 @@ def _build_method(svc: ServiceSpec, attr: str, func: Callable[..., Any]) -> Meth
         kind = "async def" if svc.is_async else "def"
         raise SchemaError(f"{where}: methods of a {base} subclass must be declared with `{kind}`")
     params = list(inspect.signature(func).parameters.values())
-    if len(params) == 3 and params[2].kind is inspect.Parameter.VAR_KEYWORD:
+    if not params or params[0].name != "self":
+        raise SchemaError(f"{where}: first parameter must be self")
+    params.pop(0)
+    if params and params[-1].kind is inspect.Parameter.VAR_KEYWORD:
         params.pop()
-    if len(params) != 2 or params[0].name != "self" or params[1].kind is inspect.Parameter.VAR_KEYWORD:
-        raise SchemaError(f"{where}: expected signature (self, request) or (self, request, **options)")
-    hints = get_type_hints(func, include_extras=False)
-    request = hints.get(params[1].name)
-    response = hints.get("return")
-    if request is None or not is_struct(request):
-        raise SchemaError(f"{where}: request parameter must be annotated with a struct")
-    if response is None or not is_struct(response):
-        raise SchemaError(f"{where}: return annotation must be a struct")
+    hints = get_type_hints(func, include_extras=True)
+    specs: list[ParamSpec] = []
+    used: set[int] = set()
+    last = 0
+    for param in params:
+        if param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY):
+            raise SchemaError(f"{where}: parameter {param.name!r} must be a plain positional parameter")
+        if param.name in _OPTION_KEYS:
+            raise SchemaError(f"{where}: parameter {param.name!r} clashes with a call option, rename it (the name is not sent on the wire)")
+        if param.default is not inspect.Parameter.empty:
+            raise SchemaError(f"{where}: parameter {param.name!r} cannot have a default")
+        hint = hints.get(param.name)
+        if hint is None:
+            raise SchemaError(f"{where}: parameter {param.name!r} needs a type annotation")
+        inner, metadata = split_annotated(hint)
+        inner, optional = split_optional(inner)
+        inner, more = split_annotated(inner)
+        metadata = metadata + more
+        ids = [m.number for m in metadata if isinstance(m, Id)]
+        number = ids[0] if ids else last + 1
+        if number in used:
+            raise SchemaError(f"{where}: duplicate parameter id {number}")
+        used.add(number)
+        last = number
+        spec = resolve_type(hint if not optional else inner, where=f"{where}({param.name})")
+        if optional and isinstance(spec, (ListType, MapType)):
+            raise SchemaError(f"{where}: list and dict parameters cannot be optional")
+        specs.append(ParamSpec(param.name, number, spec, optional))
+    if "return" not in hints:
+        raise SchemaError(f"{where}: missing return annotation, use `-> None` for no result")
+    ret = hints["return"]
+    returns = None if ret is type(None) else resolve_type(ret, where=f"{where} return")
     wire_name = getattr(func, NAME_ATTR, attr)
-    return MethodSpec(svc, wire_name, request, response, attr)
+    signature = inspect.Signature([p.replace(kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=inspect.Parameter.empty) for p in params])
+    return MethodSpec(svc, wire_name, tuple(specs), returns, getattr(func, RAISES_ATTR, ()), attr, signature)
 
 
 def remote_methods(cls: type) -> dict[str, _RemoteMethod]:

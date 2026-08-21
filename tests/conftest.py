@@ -127,3 +127,68 @@ def tls_rpc_server(oracle, tls_cert):
     server, port = _start_server(credentials=creds)
     yield port, cert
     server.stop(0)
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="session")
+def thrift_server():
+    """A thriftpy2 TBinary + TFramed server for tests/rpc.thrift, yields (port, module)."""
+    import socket
+    import threading
+
+    import thriftpy2
+    from thriftpy2.protocol import TBinaryProtocolFactory
+    from thriftpy2.rpc import make_server
+    from thriftpy2.transport import TFramedTransportFactory
+
+    rpc = thriftpy2.load(str(HERE / "rpc.thrift"), module_name="rpc_thrift")
+
+    class Handler:
+        def get(self, key, limit):
+            if key == "missing":
+                raise rpc.NotFound(key=key)
+            if key == "busy":
+                raise rpc.Busy(retry_after=7)
+            return rpc.Item(key=key, count=limit, tags=["a", "b"])
+
+        def put(self, item):
+            assert item.key
+
+        def total(self):
+            return 1 << 40
+
+        def counts(self, keys):
+            return {k: len(k) for k in keys}
+
+        def slow(self):
+            time.sleep(1)
+            return rpc.Item(key="late", count=0, tags=[])
+
+        def boom(self):
+            raise ValueError("kaboom")
+
+        def undeclared(self, key):
+            raise rpc.NotFound(key=key)
+
+    port = _free_port()
+    server = make_server(
+        rpc.Store, Handler(), "127.0.0.1", port,
+        proto_factory=TBinaryProtocolFactory(), trans_factory=TFramedTransportFactory(),
+    )
+    thread = threading.Thread(target=server.serve, daemon=True)
+    thread.start()
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.1).close()
+            break
+        except OSError:
+            time.sleep(0.02)
+    yield port, rpc
+    server.close()

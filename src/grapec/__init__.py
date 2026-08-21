@@ -32,6 +32,7 @@ from .service import (
     aclose,
     close,
     name,
+    raises,
     session_of,
 )
 from .session import AsyncSession, Session
@@ -50,6 +51,7 @@ __all__ = [
     "Client",
     "AsyncClient",
     "name",
+    "raises",
     "CallOptions",
     "CallDetails",
     "close",

@@ -7,11 +7,13 @@ share a session. ``Session.call`` is the low level entry point.
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, parse_qs, urlsplit
 
+from . import thrift as _thrift
 from .errors import RpcError
 from .pool import Pool
-from .service import CallDetails, MethodSpec, method_of
+from .schema import SchemaError
+from .service import CallDetails, MethodSpec, method_of, remote_methods
 
 Req = TypeVar("Req")
 Resp = TypeVar("Resp")
@@ -75,6 +77,67 @@ class TransportOptions:
         self.url = url
         self.connect_timeout = connect_timeout
         self.ssl = ssl
+        self.query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+
+
+class _GrpcProtocol:
+    """How calls are encoded for gRPC: one struct in, one struct out, metadata allowed."""
+
+    name = "gRPC"
+    metadata = True
+
+    def check(self, spec: MethodSpec) -> None:
+        if spec.unary_struct is None:
+            raise SchemaError(
+                f"{spec.service.cls.__qualname__}.{spec.python_name}: gRPC methods take exactly one struct parameter and return a struct"
+            )
+
+    def encode(self, spec: MethodSpec, arguments: dict[str, Any]) -> tuple[str, bytes]:
+        request_cls, _ = spec.unary_struct  # type: ignore[misc]
+        request = arguments[spec.params[0].name]
+        if not isinstance(request, request_cls):
+            raise TypeError(f"{spec.path} expects {request_cls.__qualname__}, got {type(request).__qualname__}")
+        return spec.path, request.to_bytes()
+
+    def decode(self, spec: MethodSpec, raw: bytes) -> Any:
+        _, response_cls = spec.unary_struct  # type: ignore[misc]
+        return response_cls.from_bytes(raw)
+
+
+class _ThriftProtocol:
+    """How calls are encoded for thrift: an args struct in, a result struct out."""
+
+    name = "thrift"
+    metadata = False
+
+    def check(self, spec: MethodSpec) -> None:
+        _thrift.method_fields(spec)
+
+    def encode(self, spec: MethodSpec, arguments: dict[str, Any]) -> tuple[str, bytes]:
+        return spec.name, _thrift.encode_call(spec, arguments)
+
+    def decode(self, spec: MethodSpec, raw: bytes) -> Any:
+        return _thrift.decode_result(spec, raw)
+
+
+_PROTOCOLS: dict[str, Any] = {
+    "grpc": _GrpcProtocol(),
+    "grpcs": _GrpcProtocol(),
+    "thrift": _ThriftProtocol(),
+    "thrifts": _ThriftProtocol(),
+}
+_checked_services: set[tuple[type, str]] = set()
+
+
+def check_service(session: Any, cls: type) -> None:
+    """Make sure every method of ``cls`` can be carried by the session's protocol."""
+    protocol = session._protocol
+    key = (cls, protocol.name)
+    if key in _checked_services:
+        return
+    for method in remote_methods(cls).values():
+        protocol.check(method.spec)
+    _checked_services.add(key)
 
 
 def _host_port(url: SplitResult, default_port: int) -> tuple[str, int]:
@@ -97,15 +160,43 @@ def _grpc_async(opts: TransportOptions, tls: bool) -> AsyncConnectionFactory:
     return lambda: AsyncGrpcConnection(host, port, tls=tls, ssl_context=opts.ssl).connect(opts.connect_timeout)
 
 
+def _thrift_service(opts: TransportOptions) -> str | None:
+    """The multiplexed service name from ``?multiplexed=<name>`` (or ``=1`` for the class name)."""
+    value = opts.query.get("multiplexed")
+    if value is None or value.lower() in ("0", "false", "no"):
+        return None
+    return value
+
+
+def _thrift_sync(opts: TransportOptions, tls: bool) -> ConnectionFactory:
+    from .sync import ThriftConnection
+
+    host, port = _host_port(opts.url, 9090)
+    service = _thrift_service(opts)
+    return lambda: ThriftConnection(host, port, tls=tls, connect_timeout=opts.connect_timeout, ssl_context=opts.ssl, service=service)
+
+
+def _thrift_async(opts: TransportOptions, tls: bool) -> AsyncConnectionFactory:
+    from .aio import AsyncThriftConnection
+
+    host, port = _host_port(opts.url, 9090)
+    service = _thrift_service(opts)
+    return lambda: AsyncThriftConnection(host, port, tls=tls, ssl_context=opts.ssl, service=service).connect(opts.connect_timeout)
+
+
 _SYNC_SCHEMES: dict[str, Callable[[TransportOptions], ConnectionFactory]] = {
     "grpc": lambda opts: _grpc_sync(opts, False),
     "grpcs": lambda opts: _grpc_sync(opts, True),
+    "thrift": lambda opts: _thrift_sync(opts, False),
+    "thrifts": lambda opts: _thrift_sync(opts, True),
 }
 _ASYNC_SCHEMES: dict[str, Callable[[TransportOptions], AsyncConnectionFactory]] = {
     "grpc": lambda opts: _grpc_async(opts, False),
     "grpcs": lambda opts: _grpc_async(opts, True),
+    "thrift": lambda opts: _thrift_async(opts, False),
+    "thrifts": lambda opts: _thrift_async(opts, True),
 }
-_TLS_SCHEMES = frozenset({"grpcs"})
+_TLS_SCHEMES = frozenset({"grpcs", "thrifts"})
 
 
 class _BaseSession:
@@ -129,6 +220,12 @@ class _BaseSession:
         self._connect_timeout = connect_timeout
         self._ssl = ssl
         self._pool: Pool[Any] = Pool(max_idle, max_idle_time)
+        try:
+            self._protocol = _PROTOCOLS[self._parsed.scheme]
+        except KeyError:
+            raise ValueError(f"unsupported scheme {self._parsed.scheme!r} in {self.url!r}") from None
+        if compression is not None and not self._protocol.metadata:
+            raise ValueError(f"compression is not available with {self._protocol.name}")
         if ssl is not None:
             import ssl as _ssl
 
@@ -144,13 +241,18 @@ class _BaseSession:
             raise ValueError(f"unsupported scheme {self._parsed.scheme!r} in {self.url!r}") from None
         return make(TransportOptions(self._parsed, self._connect_timeout, self._ssl))
 
-    def _prepare(self, method: Any, request: Any, timeout: float | None, compression: str | None) -> tuple[MethodSpec, bytes, float | None, str | None]:
+    def _prepare(
+        self, method: Any, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None, metadata: Metadata | None, compression: str | None
+    ) -> tuple[MethodSpec, str, bytes, float | None, str | None]:
         spec = method_of(method)
-        if not isinstance(request, spec.request):
-            raise TypeError(f"{spec.path} expects {spec.request.__qualname__}, got {type(request).__qualname__}")
-        payload = request.to_bytes()
+        protocol = self._protocol
+        protocol.check(spec)
+        if not protocol.metadata and (metadata is not None or compression is not None):
+            raise TypeError(f"metadata and compression are not available with {protocol.name}")
+        path, payload = protocol.encode(spec, spec.bind(args, kwargs))
         return (
             spec,
+            path,
             payload,
             self.timeout if timeout is None else timeout,
             self.compression if compression is None else compression,
@@ -166,8 +268,9 @@ def _record(details: CallDetails | None, headers: Metadata, trailers: Metadata) 
 class Session(_BaseSession):
     """Owns pooled connections to one server.
 
-    ``url`` selects the protocol by scheme, for example ``grpc://host:50051``
-    or ``grpcs://host:443``. Connections are pooled, at most ``max_idle`` idle
+    ``url`` selects the protocol by scheme, ``grpc://host:50051``,
+    ``grpcs://host:443``, ``thrift://host:9090`` or ``thrifts://host:9090``
+    (``?multiplexed=<service>`` for a TMultiplexedProtocol server). Connections are pooled, at most ``max_idle`` idle
     connections are kept and none longer than ``max_idle_time`` seconds.
     A connection that fails below the application level is dropped, the
     error is raised to the caller and never retried.
@@ -202,30 +305,30 @@ class Session(_BaseSession):
 
     def call(
         self,
-        method: Callable[[Any, Req], Resp],
-        request: Req,
-        *,
+        method: Callable[..., Resp],
+        *args: Any,
         timeout: float | None = None,
         metadata: Metadata | None = None,
         compression: str | None = None,
         details: CallDetails | None = None,
+        **kwargs: Any,
     ) -> Resp:
-        """Invoke ``method`` (for example ``Greeter.say_hello``) with ``request``.
+        """Invoke ``method`` (for example ``Greeter.say_hello``) with its arguments.
 
         Works with methods of both ``Client`` and ``AsyncClient`` subclasses.
         ``details`` receives the response headers and trailers.
         """
-        spec, payload, timeout, compression = self._prepare(method, request, timeout, compression)
+        spec, path, payload, timeout, compression = self._prepare(method, args, kwargs, timeout, metadata, compression)
         conn = self._acquire()
         try:
-            raw, headers, trailers = conn.unary(spec.path, payload, timeout=timeout, metadata=metadata, compression=compression)
+            raw, headers, trailers = conn.unary(path, payload, timeout=timeout, metadata=metadata, compression=compression)
         except RpcError as exc:
             _record(details, exc.headers, exc.trailers)
             raise
         finally:
             self._release(conn)
         _record(details, headers, trailers)
-        return spec.response.from_bytes(raw)  # type: ignore[no-any-return]
+        return self._protocol.decode(spec, raw)  # type: ignore[no-any-return]
 
     def close(self) -> None:
         for conn in self._pool.drain():
@@ -288,25 +391,25 @@ class AsyncSession(_BaseSession):
 
     async def call(
         self,
-        method: Callable[[Any, Req], Resp],
-        request: Req,
-        *,
+        method: Callable[..., Resp],
+        *args: Any,
         timeout: float | None = None,
         metadata: Metadata | None = None,
         compression: str | None = None,
         details: CallDetails | None = None,
+        **kwargs: Any,
     ) -> Resp:
-        spec, payload, timeout, compression = self._prepare(method, request, timeout, compression)
+        spec, path, payload, timeout, compression = self._prepare(method, args, kwargs, timeout, metadata, compression)
         conn = await self._acquire()
         try:
-            raw, headers, trailers = await conn.unary(spec.path, payload, timeout=timeout, metadata=metadata, compression=compression)
+            raw, headers, trailers = await conn.unary(path, payload, timeout=timeout, metadata=metadata, compression=compression)
         except RpcError as exc:
             _record(details, exc.headers, exc.trailers)
             raise
         finally:
             await self._release(conn)
         _record(details, headers, trailers)
-        return spec.response.from_bytes(raw)  # type: ignore[no-any-return]
+        return self._protocol.decode(spec, raw)  # type: ignore[no-any-return]
 
     async def aclose(self) -> None:
         for conn in self._pool.drain():

@@ -1,4 +1,4 @@
-"""Blocking socket transport for :class:`GrpcProtocol`."""
+"""Blocking socket transports for :class:`GrpcProtocol` and :class:`ThriftProtocol`."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 
 from .errors import RpcError, Status, TransportError
 from .grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
+from .thrift import ThriftProtocol
 
 _RECV_SIZE = 65536
 
@@ -130,5 +131,92 @@ class GrpcConnection:
         finally:
             # any other exit (KeyboardInterrupt, bugs) must not leave a half
             # finished call on a connection that goes back to the pool
+            if proto.busy:
+                proto.abort()
+
+
+class ThriftConnection:
+    """One framed thrift connection, the socket twin of :class:`GrpcConnection`."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        tls: bool,
+        connect_timeout: float | None,
+        ssl_context: ssl.SSLContext | None = None,
+        service: str | None = None,
+    ) -> None:
+        target = authority(host, port)
+        sock: Any = None
+        try:
+            sock = socket.create_connection((host, port), timeout=connect_timeout)
+            if tls:
+                sock = (ssl_context or tls_context()).wrap_socket(sock, server_hostname=host)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            raise TransportError(f"cannot connect to {target}: {exc}") from exc
+        self._sock = sock
+        self._proto = ThriftProtocol(service)
+
+    @property
+    def healthy(self) -> bool:
+        return self._proto.healthy
+
+    def poll(self) -> None:
+        """A framed server never speaks first, so anything readable (or EOF) means the connection is gone."""
+        try:
+            self._sock.settimeout(0)
+            self._proto.feed_idle(self._sock.recv(_RECV_SIZE))
+        except (BlockingIOError, ssl.SSLWantReadError):
+            pass
+        except IO_ERRORS:
+            self._proto.abort()
+
+    def close(self, *, flush: bool = True) -> None:
+        self._proto.close()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def unary(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> tuple[bytes, Metadata, Metadata]:
+        proto = self._proto
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        try:
+            self._sock.settimeout(timeout)
+            proto.start(path, payload)
+            self._sock.sendall(proto.data_to_send())
+            while not proto.done:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise socket.timeout()
+                    self._sock.settimeout(remaining)
+                proto.feed(self._sock.recv(_RECV_SIZE))
+            return proto.result(), {}, {}
+        except RpcError:
+            raise
+        except socket.timeout as exc:
+            # thrift has no cancel, a late reply would poison the next call
+            proto.abort()
+            raise RpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
+        except TransportError:
+            proto.abort()
+            raise
+        except IO_ERRORS as exc:
+            proto.abort()
+            raise TransportError(str(exc)) from exc
+        finally:
             if proto.busy:
                 proto.abort()

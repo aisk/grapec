@@ -1,9 +1,13 @@
-"""Encode and decode struct instances using the thrift binary protocol.
+"""The thrift binary protocol, struct codec and RPC message layer.
 
-Only the struct encoding lives here, message framing for RPC is separate.
 Field ids, requiredness and the container types map directly onto the
 schema. Things thrift has no counterpart for (``datetime``, ``timedelta``)
 are rejected when the struct is first used with this codec.
+
+:class:`ThriftProtocol` is the sans-IO call state for one framed
+connection, the sync and async shells in ``sync.py`` and ``aio.py`` move
+its bytes. Only ``TBinaryProtocol`` over ``TFramedTransport`` is spoken,
+one call at a time per connection.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import struct as _struct
 from typing import Any
 
+from .errors import RpcError, Status, TransportError
 from .protobuf import EncodeError, _check, _check_int
 from .schema import (
     DurationType,
@@ -18,6 +23,7 @@ from .schema import (
     FieldSpec,
     ListType,
     MapType,
+    Member,
     OneOfType,
     ScalarType,
     SchemaError,
@@ -106,9 +112,13 @@ def encode(obj: Any) -> bytes:
 
 
 def _encode_struct(out: bytearray, schema: StructSchema, obj: Any) -> None:
-    for field in schema.fields:
-        value = getattr(obj, field.name)
-        _encode_field(out, field, value, where=f"{schema.cls.__qualname__}.{field.name}")
+    encode_fields(out, schema.fields, {f.name: getattr(obj, f.name) for f in schema.fields}, schema.cls.__qualname__)
+
+
+def encode_fields(out: bytearray, fields: tuple[FieldSpec, ...], values: dict[str, Any], owner: str) -> None:
+    """Write ``values`` as a struct body (fields then STOP), also used for call arguments."""
+    for field in fields:
+        _encode_field(out, field, values[field.name], where=f"{owner}.{field.name}")
     out.append(STOP)
 
 
@@ -211,7 +221,31 @@ def decode(cls: type, data: bytes | bytearray | memoryview) -> Any:
 
 
 def decode_struct(schema: StructSchema, buf: bytes, pos: int) -> tuple[Any, int]:
-    by_number = schema.by_number
+    values, pos = decode_fields(schema.by_number, buf, pos)
+    kwargs = {}
+    for field in schema.fields:
+        if field.name in values:
+            kwargs[field.name] = values[field.name]
+        elif field.optional:
+            kwargs[field.name] = None
+        else:
+            kwargs[field.name] = zero_value(field.type)
+    return schema.cls(**kwargs), pos
+
+
+def index_fields(fields: tuple[FieldSpec, ...]) -> dict[int, tuple[FieldSpec, Member | None]]:
+    out: dict[int, tuple[FieldSpec, Member | None]] = {}
+    for f in fields:
+        if isinstance(f.type, OneOfType):
+            for m in f.type.members:
+                out[m.number] = (f, m)
+        else:
+            out[f.number] = (f, None)
+    return out
+
+
+def decode_fields(by_number: dict[int, tuple[FieldSpec, Member | None]], buf: bytes, pos: int) -> tuple[dict[str, Any], int]:
+    """Read a struct body up to and including STOP, returning the fields that were present."""
     values: dict[str, Any] = {}
     while True:
         ttype, pos = _read_byte(buf, pos)
@@ -225,16 +259,7 @@ def decode_struct(schema: StructSchema, buf: bytes, pos: int) -> tuple[Any, int]
         field, member = entry
         spec = member.type if member is not None else field.type
         values[field.name], pos = _decode_value(spec, buf, pos, ttype)
-
-    kwargs = {}
-    for field in schema.fields:
-        if field.name in values:
-            kwargs[field.name] = values[field.name]
-        elif field.optional:
-            kwargs[field.name] = None
-        else:
-            kwargs[field.name] = zero_value(field.type)
-    return schema.cls(**kwargs), pos
+    return values, pos
 
 
 def _decode_value(spec: TypeSpec, buf: bytes, pos: int, ttype: int) -> tuple[Any, int]:
@@ -341,3 +366,235 @@ def _check_count(count: int) -> int:
     if count < 0:
         raise ThriftError(f"negative size {count}")
     return count
+
+
+# ---------------------------------------------------------------------------
+# RPC messages, TBinaryProtocol strict encoding over TFramedTransport
+
+CALL = 1
+REPLY = 2
+EXCEPTION = 3
+ONEWAY = 4
+
+VERSION_1 = 0x80010000
+_VERSION_MASK = 0xFFFF0000
+_FRAME_LEN = _struct.Struct(">I")
+_U32 = _struct.Struct(">I")
+MAX_FRAME = 64 * 1024 * 1024
+
+# TApplicationException types to grapec status codes
+_APP_EXCEPTION_STATUS = {
+    0: Status.UNKNOWN,  # UNKNOWN
+    1: Status.UNIMPLEMENTED,  # UNKNOWN_METHOD
+    2: Status.INTERNAL,  # INVALID_MESSAGE_TYPE
+    3: Status.INTERNAL,  # WRONG_METHOD_NAME
+    4: Status.INTERNAL,  # BAD_SEQUENCE_ID
+    5: Status.UNKNOWN,  # MISSING_RESULT
+    6: Status.INTERNAL,  # INTERNAL_ERROR
+    7: Status.INTERNAL,  # PROTOCOL_ERROR
+    8: Status.INTERNAL,  # INVALID_TRANSFORM
+    9: Status.INTERNAL,  # INVALID_PROTOCOL
+    10: Status.UNIMPLEMENTED,  # UNSUPPORTED_CLIENT_TYPE
+}
+_APP_EXCEPTION_NAMES = {
+    0: "UNKNOWN", 1: "UNKNOWN_METHOD", 2: "INVALID_MESSAGE_TYPE", 3: "WRONG_METHOD_NAME",
+    4: "BAD_SEQUENCE_ID", 5: "MISSING_RESULT", 6: "INTERNAL_ERROR", 7: "PROTOCOL_ERROR",
+    8: "INVALID_TRANSFORM", 9: "INVALID_PROTOCOL", 10: "UNSUPPORTED_CLIENT_TYPE",
+}
+
+
+def encode_message(name: str, mtype: int, seqid: int, body: bytes) -> bytes:
+    """One framed message: length prefix, strict header, body."""
+    raw = name.encode("utf-8")
+    message = _U32.pack(VERSION_1 | mtype) + _I32.pack(len(raw)) + raw + _I32.pack(seqid) + body
+    return _FRAME_LEN.pack(len(message)) + message
+
+
+def decode_message(frame: bytes) -> tuple[str, int, int, bytes]:
+    """``(name, type, seqid, body)`` of one unframed message. Raises ``ThriftError``."""
+    header, pos = _read(_U32, frame, 0)
+    if header & _VERSION_MASK != VERSION_1:
+        raise ThriftError(f"bad message version {header:#x}, only the strict binary protocol is supported")
+    mtype = header & 0xFF
+    raw, pos = _read_binary(frame, pos)
+    seqid, pos = _read(_I32, frame, pos)
+    return raw.decode("utf-8", "replace"), mtype, seqid, frame[pos:]
+
+
+def application_error(body: bytes) -> RpcError:
+    """Turn a TApplicationException struct into an ``RpcError``."""
+    message = ""
+    kind = 0
+    pos = 0
+    while True:
+        ttype, pos = _read_byte(body, pos)
+        if ttype == STOP:
+            break
+        number, pos = _read(_FIELD_ID, body, pos)
+        if number == 1 and ttype == STRING:
+            raw, pos = _read_binary(body, pos)
+            message = raw.decode("utf-8", "replace")
+        elif number == 2 and ttype == I32:
+            kind, pos = _read(_I32, body, pos)
+        else:
+            pos = skip(body, pos, ttype)
+    code = _APP_EXCEPTION_STATUS.get(kind, Status.UNKNOWN)
+    name = _APP_EXCEPTION_NAMES.get(kind, str(kind))
+    return RpcError(code, f"{name}: {message}" if message else name)
+
+
+_methods: dict[Any, tuple[tuple[FieldSpec, ...], tuple[FieldSpec, ...], dict[int, Any]]] = {}
+
+
+def method_fields(spec: Any) -> tuple[tuple[FieldSpec, ...], tuple[FieldSpec, ...], dict[int, Any]]:
+    """``(args fields, result fields, result index)`` of a ``MethodSpec``, validated once."""
+    cached = _methods.get(spec)
+    if cached is not None:
+        return cached
+    where = f"{spec.service.cls.__qualname__}.{spec.python_name}"
+    args = tuple(FieldSpec(p.name, p.number, p.type, p.optional) for p in spec.params)
+    for field in args:
+        if field.number > MAX_FIELD_ID:
+            raise SchemaError(f"{where}: parameter id {field.number} does not fit in thrift's i16")
+        _check_type(field.type, f"{where}({field.name})")
+    result: list[FieldSpec] = []
+    if spec.returns is not None:
+        _check_type(spec.returns, f"{where} return")
+        result.append(FieldSpec("success", 0, spec.returns, True))
+    for number, exc in enumerate(spec.raises, 1):
+        check_schema(schema_of(exc))
+        result.append(FieldSpec(f"exception{number}", number, StructType(exc), True))
+    cached = (args, tuple(result), index_fields(tuple(result)))
+    _methods[spec] = cached
+    return cached
+
+
+def encode_call(spec: Any, arguments: dict[str, Any]) -> bytes:
+    """The args struct of a call, ``arguments`` maps parameter names to values."""
+    args, _, _ = method_fields(spec)
+    out = bytearray()
+    encode_fields(out, args, arguments, f"{spec.service.cls.__qualname__}.{spec.python_name}")
+    return bytes(out)
+
+
+def decode_result(spec: Any, body: bytes) -> Any:
+    """Return value of a REPLY body, raises the declared exception struct if one was set."""
+    _, result, by_number = method_fields(spec)
+    values, pos = decode_fields(by_number, body, 0)
+    if pos != len(body):
+        raise ThriftError(f"{len(body) - pos} trailing bytes after result")
+    for field in result[1:] if result and result[0].number == 0 else result:
+        exc = values.get(field.name)
+        if exc is not None:
+            raise exc
+    if spec.returns is None:
+        return None
+    if "success" in values:
+        return values["success"]
+    raise RpcError(Status.UNKNOWN, f"MISSING_RESULT: {spec.name} returned neither a value nor a declared exception")
+
+
+class ThriftProtocol:
+    """Sans-IO client state for one framed thrift connection, one call at a time."""
+
+    def __init__(self, service: str | None = None) -> None:
+        self._service = service  # set for TMultiplexedProtocol, prefixes method names
+        self._seqid = 0
+        self._inbuf = bytearray()
+        self._out = b""
+        self._call: tuple[str, int] | None = None
+        self._reply: tuple[int, bytes] | None = None
+        self.dead = False
+
+    @property
+    def healthy(self) -> bool:
+        return not self.dead
+
+    @property
+    def busy(self) -> bool:
+        return self._call is not None
+
+    @property
+    def done(self) -> bool:
+        return self._reply is not None
+
+    def start(self, method: str, args: bytes) -> None:
+        """Queue one call. Follow with ``data_to_send`` / ``feed`` until ``done``."""
+        if self._call is not None:
+            raise TransportError("connection is busy")
+        if self.dead:
+            raise TransportError("connection is closed")
+        self._seqid = (self._seqid + 1) & 0x7FFFFFFF
+        name = f"{self._service}:{method}" if self._service else method
+        self._call = (method, self._seqid)
+        self._reply = None
+        self._out = encode_message(name, CALL, self._seqid, args)
+
+    def data_to_send(self) -> bytes:
+        out, self._out = self._out, b""
+        return out
+
+    def feed(self, data: bytes) -> None:
+        """Process bytes read from the network, raises ``TransportError`` on a dead connection."""
+        if not data:
+            self.dead = True
+            raise TransportError("connection closed by peer")
+        if self._call is None:
+            # nothing was asked, a framed server never speaks first
+            self.dead = True
+            raise TransportError("unexpected data on an idle connection")
+        self._inbuf += data
+        if len(self._inbuf) < _FRAME_LEN.size:
+            return
+        length = _FRAME_LEN.unpack_from(self._inbuf)[0]
+        if length > MAX_FRAME:
+            self.dead = True
+            raise TransportError(f"frame of {length} bytes exceeds the {MAX_FRAME} byte limit")
+        if len(self._inbuf) < _FRAME_LEN.size + length:
+            return
+        frame = bytes(self._inbuf[_FRAME_LEN.size : _FRAME_LEN.size + length])
+        del self._inbuf[: _FRAME_LEN.size + length]
+        if self._inbuf:
+            self.dead = True
+            raise TransportError("server sent more than one reply")
+        try:
+            name, mtype, seqid, body = decode_message(frame)
+        except ThriftError as exc:
+            self.dead = True
+            raise TransportError(str(exc)) from exc
+        method, expected = self._call
+        if seqid != expected:
+            self.dead = True
+            raise TransportError(f"reply seqid {seqid} does not match request {expected}")
+        if mtype not in (REPLY, EXCEPTION):
+            self.dead = True
+            raise TransportError(f"unexpected message type {mtype}")
+        if name.rpartition(":")[2] != method:
+            self.dead = True
+            raise TransportError(f"reply for {name!r} while waiting for {method!r}")
+        self._reply = (mtype, body)
+
+    def feed_idle(self, data: bytes) -> None:
+        """``feed`` for bytes that arrived while no call was active, never raises."""
+        try:
+            self.feed(data)
+        except TransportError:
+            pass
+
+    def result(self) -> bytes:
+        """Body of the finished call, the result struct. Raises ``RpcError`` for a server side exception."""
+        assert self._reply is not None
+        mtype, body = self._reply
+        self._call = self._reply = None
+        if mtype == EXCEPTION:
+            raise application_error(body)
+        return body
+
+    def abort(self) -> None:
+        """Forget the current call and mark the connection unusable."""
+        self._call = self._reply = None
+        self._inbuf.clear()
+        self.dead = True
+
+    def close(self) -> None:
+        self.dead = True

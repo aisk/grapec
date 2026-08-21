@@ -37,6 +37,10 @@ def struct(*, package: str) -> Callable[[type[T]], type[T]]:
         _inject_defaults(cls)
         cls = dataclasses.dataclass(kw_only=True)(cls)
         setattr(cls, PACKAGE_ATTR, package)
+        if issubclass(cls, BaseException):
+            # exception structs (thrift `exception`) are raised and caught like any other
+            cls.__str__ = cls.__repr__  # type: ignore[method-assign]
+            cls.__hash__ = object.__hash__  # type: ignore[method-assign]
         cls.to_bytes = _to_bytes  # type: ignore[attr-defined]
         cls.__bytes__ = _bytes  # type: ignore[attr-defined]
         cls.from_bytes = classmethod(_from_bytes)  # type: ignore[attr-defined]

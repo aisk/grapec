@@ -1,4 +1,4 @@
-"""asyncio transport for :class:`GrpcProtocol`."""
+"""asyncio transports for :class:`GrpcProtocol` and :class:`ThriftProtocol`."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import ssl
 
 from .errors import RpcError, Status, TransportError
 from .grpc import IO_ERRORS, GrpcProtocol, Metadata, authority, tls_context
+from .thrift import ThriftProtocol
 
 _RECV_SIZE = 65536
 _CLOSE_TIMEOUT = 1
@@ -148,3 +149,100 @@ class AsyncGrpcConnection:
             self._writer.write(data)
         except Exception:
             self._proto.abort()
+
+
+class AsyncThriftConnection:
+    """One framed thrift connection, the asyncio twin of :class:`AsyncGrpcConnection`."""
+
+    def __init__(
+        self, host: str, port: int, *, tls: bool, ssl_context: ssl.SSLContext | None = None, service: str | None = None
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._tls = tls
+        self._ssl_context = ssl_context
+        self._proto = ThriftProtocol(service)
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+
+    async def connect(self, connect_timeout: float | None) -> "AsyncThriftConnection":
+        target = authority(self._host, self._port)
+        ctx = (self._ssl_context or tls_context()) if self._tls else None
+        try:
+            async with asyncio.timeout(connect_timeout):
+                self._reader, self._writer = await asyncio.open_connection(
+                    self._host, self._port, ssl=ctx, server_hostname=self._host if self._tls else None
+                )
+        except (OSError, TimeoutError) as exc:
+            raise TransportError(f"cannot connect to {target}: {exc}") from exc
+        return self
+
+    @property
+    def healthy(self) -> bool:
+        return self._proto.healthy and self._writer is not None and not self._writer.is_closing()
+
+    async def poll(self) -> None:
+        reader = self._reader
+        assert reader is not None
+        if reader.at_eof():
+            self._proto.feed_idle(b"")
+            return
+        try:
+            async with asyncio.timeout(0):
+                data = await reader.read(_RECV_SIZE)
+        except TimeoutError:
+            return
+        except IO_ERRORS:
+            self._proto.abort()
+            return
+        self._proto.feed_idle(data)
+
+    def close(self, *, flush: bool = True) -> None:
+        self._proto.close()
+        if self._writer is not None:
+            self._writer.close()
+
+    async def aclose(self) -> None:
+        if self._writer is None:
+            return
+        self._proto.close()
+        self._writer.close()
+        try:
+            async with asyncio.timeout(_CLOSE_TIMEOUT):
+                await self._writer.wait_closed()
+        except Exception:
+            self._writer.transport.abort()
+
+    async def unary(
+        self,
+        path: str,
+        payload: bytes,
+        *,
+        timeout: float | None,
+        metadata: Metadata | None,
+        compression: str | None,
+    ) -> tuple[bytes, Metadata, Metadata]:
+        proto = self._proto
+        assert self._reader is not None and self._writer is not None
+        try:
+            async with asyncio.timeout(timeout):
+                proto.start(path, payload)
+                self._writer.write(proto.data_to_send())
+                await self._writer.drain()
+                while not proto.done:
+                    proto.feed(await self._reader.read(_RECV_SIZE))
+            return proto.result(), {}, {}
+        except RpcError:
+            raise
+        except TimeoutError as exc:
+            proto.abort()
+            raise RpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
+        except TransportError:
+            proto.abort()
+            raise
+        except IO_ERRORS as exc:
+            proto.abort()
+            raise TransportError(str(exc)) from exc
+        finally:
+            if proto.busy:
+                proto.abort()

@@ -244,20 +244,33 @@ def test_inherits_package():
 
 
 def test_service_signature_validation():
-    with pytest.raises(grapec.SchemaError):
+    # several parameters and plain returns are fine for thrift, gRPC rejects them when the client is built
+    class Multi(grapec.Client, package="t"):
+        def two(self, a: HelloRequest, b: HelloRequest) -> HelloReply: ...
 
-        class Bad(grapec.Client, package="t"):
-            def two(self, a: HelloRequest, b: HelloRequest) -> HelloReply: ...
+    class Plain(grapec.Client, package="t"):
+        def plain_return(self, request: HelloRequest) -> int: ...
 
-    with pytest.raises(grapec.SchemaError):
+    for cls in (Multi, Plain):
+        with pytest.raises(grapec.SchemaError, match="gRPC methods take exactly one struct"):
+            cls("grpc://127.0.0.1:1")
+        with pytest.raises(grapec.SchemaError):
+            grapec.export_proto(cls)
+
+    with pytest.raises(grapec.SchemaError, match="type annotation"):
 
         class Bad2(grapec.Client, package="t"):
             def untyped(self, request) -> HelloReply: ...
 
-    with pytest.raises(grapec.SchemaError):
+    with pytest.raises(grapec.SchemaError, match="return annotation"):
 
         class Bad3(grapec.Client, package="t"):
-            def plain_return(self, request: HelloRequest) -> int: ...
+            def no_return(self, request: HelloRequest): ...
+
+    with pytest.raises(grapec.SchemaError, match="clashes with a call option"):
+
+        class Bad8(grapec.Client, package="t"):
+            def clash(self, timeout: int) -> None: ...
 
     with pytest.raises(grapec.SchemaError, match="async def"):
 
