@@ -131,7 +131,7 @@ HelloRequest.from_json('{"name": "x"}')
 ```
 
 - `to_dict()` / `from_dict()` use Python field names and Python values (`IntEnum`, `datetime`, `bytes`), meant for logs and tests.
-- `to_json()` / `from_json()` follow the proto3 JSON mapping, meant for gateways: lowerCamelCase keys, `int` as strings, `bytes` as base64, RFC 3339 timestamps, `"1.5s"` durations, enum names, default values omitted, union members under their proto side names.
+- `to_json()` / `from_json()` follow the proto3 JSON mapping, meant for gateways: lowerCamelCase keys, 64 bit `int` as strings (`I8`, `I16` and `I32` as numbers), `bytes` as base64, RFC 3339 timestamps, `"1.5s"` durations, enum names, default values omitted, union members under their proto side names.
 - `from_dict()` accepts both shapes, so `json.loads` output from any protobuf implementation works too. Nested values may be dicts or struct instances. `null` means "not set": the zero value for plain fields, `None` for `T | None` fields and unions.
 
 ## Clients
@@ -166,7 +166,7 @@ d.trailers["x-request-id"]
 
 - Calls accept positional and keyword arguments like a normal Python call.
 - Every method also accepts `timeout=`, `metadata=`, `compression=` and `details=` keyword arguments. Declare `**options: Unpack[grapec.CallOptions]` on a method if you want type checkers to see them.
-- `timeout` is in seconds and overrides the client's default. Expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`.
+- `timeout` is in seconds and overrides the client's default, an explicit `timeout=None` disables it for that call. Expiry raises `RpcError` with `Status.DEADLINE_EXCEEDED`. The deadline covers sending the request and reading the reply on a connection, it does not include waiting for a pooled connection (`pool_timeout`) or establishing a new one (`connect_timeout`), so a call can take up to the sum of the three. Likewise `compression=None` sends that call uncompressed even when the client sets a default.
 - `metadata` is a dict of request headers. Binary values must be `bytes` under a key ending in `-bin`.
 - `compression` is `"gzip"` or `"deflate"` and compresses the request. Compressed responses are always accepted.
 - `details` takes a `grapec.CallDetails()` and fills its `headers` and `trailers` dicts after the call returned or raised `RpcError`. Binary values (`-bin` keys) come back as `bytes`.
