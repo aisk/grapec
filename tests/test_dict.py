@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 import pytest
 from google.protobuf import json_format
@@ -118,3 +119,14 @@ def test_timestamp_formats(text):
         ts: datetime
 
     assert S.from_json(json.dumps({"ts": text})).ts == datetime(2021, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
+
+
+def test_json_writes_narrow_ints_as_numbers():
+    @grapec.struct(package="t")
+    class Widths:
+        narrow: Annotated[int, grapec.I32]
+        wide: int
+
+    text = Widths(narrow=1, wide=2).to_json()
+    assert json.loads(text) == {"narrow": 1, "wide": "2"}
+    assert Widths.from_json(text) == Widths(narrow=1, wide=2)

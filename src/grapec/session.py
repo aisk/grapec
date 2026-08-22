@@ -135,6 +135,19 @@ _PROTOCOLS: dict[str, Any] = {
 _checked_services: set[tuple[type, str]] = set()
 
 
+class _Inherit:
+    """Default for the per call options, picks up the session wide value.
+
+    Passing ``None`` explicitly means no timeout / no compression.
+    """
+
+    def __repr__(self) -> str:
+        return "INHERIT"
+
+
+INHERIT: Any = _Inherit()
+
+
 def check_service(session: Any, cls: type) -> None:
     """Make sure every method of ``cls`` can be carried by the session's protocol."""
     protocol = session._protocol
@@ -256,20 +269,20 @@ class _BaseSession:
         return make(TransportOptions(self._parsed, self._connect_timeout, self._ssl))
 
     def _prepare(
-        self, method: Any, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: float | None, metadata: Metadata | None, compression: str | None
+        self, method: Any, args: tuple[Any, ...], kwargs: dict[str, Any], timeout: Any, metadata: Metadata | None, compression: Any
     ) -> tuple[MethodSpec, str, bytes, float | None, str | None]:
         spec = method_of(method)
         protocol = self._protocol
         protocol.check(spec)
-        if not protocol.metadata and (metadata is not None or compression is not None):
+        if not protocol.metadata and (metadata is not None or compression is not INHERIT):
             raise TypeError(f"metadata and compression are not available with {protocol.name}")
         path, payload = protocol.encode(spec, spec.bind(args, kwargs))
         return (
             spec,
             path,
             payload,
-            self.timeout if timeout is None else timeout,
-            self.compression if compression is None else compression,
+            self.timeout if timeout is INHERIT else timeout,
+            self.compression if compression is INHERIT else compression,
         )
 
 
@@ -340,9 +353,9 @@ class Session(_BaseSession):
         method: Callable[..., Resp],
         /,
         *args: Any,
-        timeout: float | None = None,
+        timeout: float | None = INHERIT,
         metadata: Metadata | None = None,
-        compression: str | None = None,
+        compression: str | None = INHERIT,
         details: CallDetails | None = None,
         **kwargs: Any,
     ) -> Resp:
@@ -451,9 +464,9 @@ class AsyncSession(_BaseSession):
         method: Callable[..., Resp],
         /,
         *args: Any,
-        timeout: float | None = None,
+        timeout: float | None = INHERIT,
         metadata: Metadata | None = None,
-        compression: str | None = None,
+        compression: str | None = INHERIT,
         details: CallDetails | None = None,
         **kwargs: Any,
     ) -> Resp:

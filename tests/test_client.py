@@ -540,3 +540,11 @@ def test_keyboard_interrupt_does_not_poison_the_pool(url, monkeypatch):
     assert len(grapec.session_of(g)._pool) == 0
     assert g.say_hello(HelloRequest(name="y")).message == "hello y 0"
     grapec.close(g)
+
+
+def test_explicit_none_timeout_disables_the_default(url):
+    g = Greeter(url, timeout=0.2)
+    with pytest.raises(grapec.RpcError):
+        g.slow(HelloRequest(name="x"))
+    assert g.slow(HelloRequest(name="x"), timeout=None).message == "late"
+    grapec.close(g)

@@ -84,8 +84,9 @@ def _dump(spec: TypeSpec, value: Any, js: bool, *, where: str) -> Any:
     if value is None:
         return None
     match spec:
-        case ScalarType(kind="int"):
-            return str(value) if js else value
+        case ScalarType(kind="int", width=width):
+            # proto3 JSON writes 64 bit integers as strings, narrower ones as numbers
+            return str(value) if js and width == 64 else value
         case ScalarType(kind="float"):
             if js and value != value:
                 return "NaN"
