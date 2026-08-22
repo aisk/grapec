@@ -6,25 +6,27 @@ Declare plain Python classes, call gRPC and thrift services with them.
 import grapec
 
 
-@grapec.struct(package="example.hello.v1")
-class HelloRequest:
-    name: str
+@grapec.struct(package="connectrpc.eliza.v1")
+class SayRequest:
+    sentence: str
 
 
-@grapec.struct(package="example.hello.v1")
-class HelloReply:
-    message: str
+@grapec.struct(package="connectrpc.eliza.v1")
+class SayResponse:
+    sentence: str
 
 
-class Greeter(grapec.Client, package="example.hello.v1"):
-    @grapec.name("SayHello")
-    def say_hello(self, request: HelloRequest) -> HelloReply: ...
+class ElizaService(grapec.Client, package="connectrpc.eliza.v1"):
+    @grapec.name("Say")
+    def say(self, request: SayRequest) -> SayResponse: ...
 
 
-greeter = Greeter("grpc://localhost:50051")
-reply = greeter.say_hello(HelloRequest(name="world"))
-print(reply.message)
+eliza = ElizaService("grpcs://demo.connectrpc.com")
+reply = eliza.say(SayRequest(sentence="I feel tired today"))
+print(reply.sentence)
 ```
+
+That talks to the public ELIZA demo at demo.connectrpc.com, paste it into a file and run it.
 
 The type hints are the schema. `@grapec.struct` turns a class into a keyword only dataclass that encodes and decodes itself with the protobuf wire format or the thrift binary protocol, and `grapec.Client` subclasses call methods on a standard gRPC or thrift server. There are no `.proto` or `.thrift` files to write and no generated code to check in. The only dependency is `h2`.
 
