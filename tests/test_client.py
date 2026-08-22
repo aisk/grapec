@@ -465,10 +465,15 @@ def test_call_details_and_error_metadata(greeter):
         assert details.trailers["x-echo"] == "s"
 
 
-def test_bound_methods_are_cached_and_usable_with_session_call(greeter):
-    assert greeter.say_hello is greeter.say_hello
+def test_bound_methods_are_usable_with_session_call(greeter):
     session = grapec.session_of(greeter)
     assert session.call(greeter.say_hello, HelloRequest(name="b")).message == "hello b 0"
+
+
+def test_temporary_client_survives_the_call(url):
+    # the bound method must keep the client alive, otherwise its __del__ closes
+    # the owned session before the call starts
+    assert Greeter(url).say_hello(HelloRequest(name="t")).message == "hello t 0"
 
 
 def test_subclass_with_name_rebinds_inherited_methods():

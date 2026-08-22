@@ -37,7 +37,6 @@ NAME_ATTR = "__grapec_name__"
 RAISES_ATTR = "__grapec_raises__"
 _SESSION_ATTR = "__grapec_session__"
 _OWNED_ATTR = "__grapec_owns_session__"
-_BOUND_ATTR = "__grapec_bound__"
 
 
 class CallDetails:
@@ -181,23 +180,21 @@ class _RemoteMethod:
     def __get__(self, instance: Any, owner: type | None = None) -> Any:
         if instance is None:
             return self
-        session = _session_of(instance)
-        bound = instance.__dict__.setdefault(_BOUND_ATTR, {})
-        try:
-            return bound[self.spec.python_name]
-        except KeyError:
-            call = bound[self.spec.python_name] = _bind(self.spec, session)
-            return call
+        # Not cached: the closure must keep ``instance`` alive for the duration of
+        # the call, otherwise ``Greeter(url).say_hello(req)`` would collect the
+        # client (and close its session) before the call starts.
+        return _bind(self.spec, instance, _session_of(instance))
 
     def __repr__(self) -> str:
         return f"<remote method {self.spec.path}>"
 
 
-def _bind(spec: MethodSpec, session: Any) -> Callable[..., Any]:
+def _bind(spec: MethodSpec, instance: Any, session: Any) -> Callable[..., Any]:
     def call(*args: Any, **kwargs: Any) -> Any:
         options = {key: kwargs.pop(key) for key in _OPTION_KEYS if key in kwargs}
         return session.call(spec, *args, **kwargs, **options)
 
+    call.__self__ = instance  # type: ignore[attr-defined]  # keeps the client alive like a bound method
     call.__name__ = spec.python_name
     call.__qualname__ = f"{spec.service.cls.__qualname__}.{spec.python_name}"
     call.__doc__ = getattr(spec.service.cls, spec.python_name).__doc__

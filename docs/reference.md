@@ -323,15 +323,18 @@ Structs:
 
 ## Examples and development
 
-`examples/hello/server.py` is a plain grpcio server compiled from `hello.proto`, standing in for a service written in any language, `client.py` and `async_client.py` talk to it with grapec only. `examples/store/` is the same for thrift, with a thriftpy2 server.
+`examples/eliza.py` and `examples/grpcbin.py` call public gRPC services (demo.connectrpc.com over TLS, grpcb.in in plaintext and TLS) and need nothing but a network connection. `examples/grpc/server.py` is a plain grpcio server compiled from `hello.proto`, standing in for a service written in any language, `client.py` and `async_client.py` talk to it with grapec only. `examples/thrift/` is the same for thrift, with a thriftpy2 server. See `examples/README.md`.
 
 ```
-cd examples/hello
+python examples/eliza.py
+python examples/grpcbin.py
+
+cd examples/grpc
 python server.py &
 python client.py
 python async_client.py
 
-cd examples/store
+cd examples/thrift
 python server.py &
 python client.py
 ```

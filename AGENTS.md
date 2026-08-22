@@ -18,8 +18,9 @@ grapec turns plain annotated Python classes into serializable structs that speak
 - `src/grapec/sync.py` and `src/grapec/aio.py`: thin blocking socket and asyncio shells around `GrpcProtocol` and `ThriftProtocol`.
 - `src/grapec/errors.py`: `Status`, `RpcError`, `TransportError`.
 - `docs/reference.md`: the full user facing reference. The README stays a short introduction, document new public behaviour in the reference.
-- `examples/hello/`: gRPC demo. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
-- `examples/store/`: thrift demo, `server.py` is a thriftpy2 server, `client.py` uses grapec only.
+- `examples/eliza.py`, `examples/grpcbin.py`: zero setup demos against public gRPC servers (demo.connectrpc.com, grpcb.in). Keep them runnable, they are the first thing a reader tries.
+- `examples/grpc/`: full gRPC feature tour. `server.py` is a grpcio server standing in for a foreign service, `client.py` and `async_client.py` use grapec only.
+- `examples/thrift/`: thrift demo, `server.py` is a thriftpy2 server, `client.py` and `async_client.py` use grapec only.
 - `tests/`: pytest suite. `tests/oracle.thrift` and `tests/rpc.thrift` are loaded by `thriftpy2`, the first as the serialization reference, the second to run a real thrift server. `tests/oracle.proto` and `tests/rpc.proto` are compiled with `grpcio-tools` at test time, the first as a serialization reference, the second to run a real grpcio server. `tests/test_protocol.py` drives `GrpcProtocol` against an h2 server connection without sockets, use it for frame level edge cases.
 
 Keep the schema layer free of wire format details, the clients free of protocol details, and protocol state machines free of IO. A protocol is a sans-IO state machine, two thin IO shells, a call adapter in `session.py` and a URL scheme.
@@ -27,7 +28,7 @@ Keep the schema layer free of wire format details, the clients free of protocol 
 ## Build, Test, and Development Commands
 - `uv sync`: create/update the virtual environment.
 - `uv run pytest`: run the test suite.
-- `uv run python examples/hello/server.py` then `uv run python examples/hello/client.py` (from `examples/hello`): run the demo.
+- `uv run python examples/eliza.py`: the quickest end to end check, needs network. `examples/README.md` lists the local demos.
 - `uv build`: build wheel and sdist into `dist/`.
 
 ## Coding Style & Naming Conventions

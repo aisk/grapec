@@ -126,7 +126,7 @@ except NotFound as exc:
 ## More
 
 - [docs/reference.md](docs/reference.md) covers struct rules, type mapping, sessions and pooling, dict and JSON views, `.proto` export and the thrift details.
-- [examples/hello](examples/hello) runs a grpcio server and calls it with grapec, [examples/store](examples/store) does the same with a thriftpy2 server.
+- [examples/eliza.py](examples/eliza.py) and [examples/grpcbin.py](examples/grpcbin.py) call public gRPC services, no setup needed. [examples/grpc](examples/grpc) and [examples/thrift](examples/thrift) run a local grpcio or thriftpy2 server and walk through every feature.
 
 Current scope is struct serialization and unary calls. Streaming is not implemented yet.
 
