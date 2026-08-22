@@ -29,7 +29,11 @@ class Status(enum.IntEnum):
 
 
 class GrapecError(Exception):
-    """Base class for everything grapec raises at call time."""
+    """Base class for call failures.
+
+    Mistakes in the calling program (wrong types, bad schemas, unsupported
+    options) raise ``TypeError`` or ``ValueError`` instead.
+    """
 
 
 class RpcError(GrapecError):

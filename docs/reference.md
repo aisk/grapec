@@ -218,13 +218,13 @@ Same call options and pooling rules. Concurrent calls each get their own connect
 
 ### Errors
 
-Everything raised at call time subclasses `grapec.GrapecError`:
+grapec separates two kinds of failures. Mistakes in the calling program raise the built in `TypeError` / `ValueError` family, like the standard library does, and are not meant to be caught: a value of the wrong type raises `grapec.EncodeError`, a class that cannot be a schema raises `grapec.SchemaError` (both `TypeError` subclasses), a call option the protocol has no concept of raises a plain `TypeError`. Failures of the call itself subclass `grapec.GrapecError`:
 
 - `grapec.RpcError`: the server answered with a non OK status. It carries `code` (`grapec.Status`, an `IntEnum` aligned with the gRPC status codes), `message`, `details` (raw bytes), and the response metadata as `headers` and `trailers`. grapec itself uses `Status.DEADLINE_EXCEEDED` for an expired timeout, `Status.RESOURCE_EXHAUSTED` for a `pool_timeout` and `Status.INTERNAL` for a reply it cannot decode.
 - `grapec.TransportError`: the connection itself failed (refused, reset, protocol error). The connection is discarded, the next call opens a new one.
 - `grapec.WireError` and `grapec.ThriftError`: bytes that do not follow the protobuf or thrift encoding. Inside a call they are wrapped in `RpcError` with `Status.INTERNAL`, directly from `from_bytes` they are raised as is.
 
-Declared thrift exceptions are raised as themselves, see [Thrift](#thrift). Type and schema problems on the Python side raise `grapec.EncodeError` and `grapec.SchemaError`, both are `TypeError` subclasses, and a call option used with a protocol that has no such concept raises a plain `TypeError`.
+Declared thrift exceptions are raised as themselves, see [Thrift](#thrift).
 
 ## gRPC
 
